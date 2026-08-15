@@ -18,6 +18,11 @@ use Illuminate\Support\Facades\DB;
 
 class CreateCompany
 {
+    public function __construct(
+        private ProvisionDefaultRoles $provisionDefaultRoles,
+        private ProvisionDefaultPaymentMethods $provisionDefaultPaymentMethods,
+    ) {}
+
     /**
      * @param  array{name: string, base_currency_id: int, legal_name?: string|null, tax_identifier?: string|null, timezone: string, locale: string, allow_negative_stock?: bool}  $attributes
      */
@@ -68,7 +73,10 @@ class CreateCompany
                 ]);
             }
 
-            return $company->load(['baseCurrency', 'memberships', 'companyModules.module']);
+            $this->provisionDefaultRoles->handle($company);
+            $this->provisionDefaultPaymentMethods->handle($company);
+
+            return $company->load(['baseCurrency', 'memberships', 'roles', 'companyModules.module', 'paymentMethods']);
         }, attempts: 3);
     }
 }

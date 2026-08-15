@@ -20,6 +20,20 @@ class ResolveCurrentCompany
         $user = $request->user();
         $membershipId = $request->header('X-Membership-ID') ?? $request->session()->get('current_membership_id');
 
+        if ($user !== null && ! is_numeric($membershipId)) {
+            $membershipId = Membership::query()
+                ->withoutGlobalScope('company')
+                ->where('user_id', $user->getKey())
+                ->where('status', MembershipStatus::Active)
+                ->orderByDesc('is_owner')
+                ->orderBy('id')
+                ->value('id');
+
+            if ($membershipId !== null) {
+                $request->session()->put('current_membership_id', $membershipId);
+            }
+        }
+
         abort_if($user === null || ! is_numeric($membershipId), Response::HTTP_FORBIDDEN);
 
         $membership = Membership::query()
@@ -36,6 +50,7 @@ class ResolveCurrentCompany
         );
 
         app(CurrentCompany::class)->set($membership);
+        app()->setLocale($membership->company->locale);
 
         return $next($request);
     }

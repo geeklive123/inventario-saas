@@ -68,6 +68,30 @@ class Membership extends Model
             ->withTimestamps();
     }
 
+    /** @return HasMany<ProductRecipe, $this> */
+    public function createdRecipes(): HasMany
+    {
+        return $this->hasMany(ProductRecipe::class, 'created_by_membership_id');
+    }
+
+    /** @return HasMany<StockMovement, $this> */
+    public function createdStockMovements(): HasMany
+    {
+        return $this->hasMany(StockMovement::class, 'created_by_membership_id');
+    }
+
+    /** @return HasMany<Sale, $this> */
+    public function confirmedSales(): HasMany
+    {
+        return $this->hasMany(Sale::class, 'confirmed_by_membership_id');
+    }
+
+    /** @return HasMany<Sale, $this> */
+    public function voidedSales(): HasMany
+    {
+        return $this->hasMany(Sale::class, 'voided_by_membership_id');
+    }
+
     public function isActive(): bool
     {
         return $this->status === MembershipStatus::Active;

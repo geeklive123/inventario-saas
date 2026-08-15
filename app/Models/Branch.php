@@ -30,6 +30,12 @@ class Branch extends Model
         return $this->hasMany(Warehouse::class);
     }
 
+    /** @return HasMany<Sale, $this> */
+    public function sales(): HasMany
+    {
+        return $this->hasMany(Sale::class);
+    }
+
     /** @return array<string, string> */
     protected function casts(): array
     {

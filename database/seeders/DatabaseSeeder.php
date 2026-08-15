@@ -18,6 +18,8 @@ class DatabaseSeeder extends Seeder
             CurrencySeeder::class,
             ModuleSeeder::class,
             PermissionSeeder::class,
+            CompanyRoleSeeder::class,
+            PaymentMethodSeeder::class,
         ]);
     }
 }

@@ -22,6 +22,7 @@ use Laravel\Fortify\TwoFactorAuthenticatable;
  * @property string $email
  * @property Carbon|null $email_verified_at
  * @property string $password
+ * @property bool $must_change_password
  * @property UserStatus $status
  * @property Carbon|null $deactivated_at
  * @property string|null $two_factor_secret
@@ -31,7 +32,7 @@ use Laravel\Fortify\TwoFactorAuthenticatable;
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  */
-#[Fillable(['name', 'email', 'password', 'status', 'deactivated_at'])]
+#[Fillable(['name', 'email', 'password', 'must_change_password', 'status', 'deactivated_at'])]
 #[Hidden(['password', 'two_factor_secret', 'two_factor_recovery_codes', 'remember_token'])]
 class User extends Authenticatable implements MustVerifyEmail
 {
@@ -40,6 +41,7 @@ class User extends Authenticatable implements MustVerifyEmail
 
     protected $attributes = [
         'status' => UserStatus::Active->value,
+        'must_change_password' => false,
     ];
 
     /** @return HasMany<Membership, $this> */
@@ -66,6 +68,7 @@ class User extends Authenticatable implements MustVerifyEmail
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'must_change_password' => 'boolean',
             'status' => UserStatus::class,
             'deactivated_at' => 'datetime',
         ];

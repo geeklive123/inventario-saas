@@ -12,13 +12,17 @@ class ChangeMembershipStatus
 {
     public function __construct(private CompanyAccess $access) {}
 
-    public function handle(Membership $actor, Membership $membership, MembershipStatus $status): Membership
-    {
+    public function handle(
+        Membership $actor,
+        Membership $membership,
+        MembershipStatus $status,
+        string $permissionCode = 'core.memberships.suspend',
+    ): Membership {
         if ($actor->company_id !== $membership->company_id) {
             throw new DomainException('Memberships must belong to the same company.');
         }
 
-        if (! $this->access->allows($actor->user, $actor->company, 'core.memberships.suspend')) {
+        if (! $this->access->allows($actor->user, $actor->company, $permissionCode)) {
             throw new DomainException('The membership actor is not authorized.');
         }
 

@@ -5,6 +5,7 @@ namespace App\Support\Authorization;
 use App\Enums\CompanyModuleStatus;
 use App\Enums\CompanyStatus;
 use App\Enums\MembershipStatus;
+use App\Enums\ModuleCode;
 use App\Models\Company;
 use App\Models\CompanyModule;
 use App\Models\Membership;
@@ -81,5 +82,23 @@ class CompanyAccess
             ->where('user_id', $user->getKey())
             ->where('status', MembershipStatus::Active)
             ->first();
+    }
+
+    public function moduleEnabled(Company $company, ModuleCode $moduleCode): bool
+    {
+        return CompanyModule::query()
+            ->withoutGlobalScope('company')
+            ->where('company_id', $company->getKey())
+            ->where('status', CompanyModuleStatus::Enabled)
+            ->whereHas('module', fn ($query) => $query
+                ->where('code', $moduleCode)
+                ->where('is_active', true))
+            ->exists();
+    }
+
+    public function moduleEnabledCurrent(ModuleCode $moduleCode): bool
+    {
+        return $this->currentCompany->isResolved()
+            && $this->moduleEnabled($this->currentCompany->company(), $moduleCode);
     }
 }

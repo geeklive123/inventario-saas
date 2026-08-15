@@ -2,12 +2,17 @@
 
 namespace App\Providers;
 
+use App\Http\Middleware\EnsureModuleEnabled;
+use App\Http\Middleware\EnsurePasswordChanged;
+use App\Http\Middleware\EnsurePermission;
+use App\Http\Middleware\ResolveCurrentCompany;
 use App\Support\Tenancy\CurrentCompany;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Date;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Validation\Rules\Password;
+use Livewire\Livewire;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -24,6 +29,13 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        Livewire::addPersistentMiddleware([
+            ResolveCurrentCompany::class,
+            EnsurePasswordChanged::class,
+            EnsureModuleEnabled::class,
+            EnsurePermission::class,
+        ]);
+
         $this->configureDefaults();
     }
 
