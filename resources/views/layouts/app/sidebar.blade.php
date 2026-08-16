@@ -14,6 +14,11 @@
                 <flux:sidebar.item icon="shopping-bag" :href="route('sales.index')" :current="request()->routeIs('sales.*')" wire:navigate>Ventas</flux:sidebar.item>
             </flux:sidebar.group>
         @endcan
+        @can('viewAny', App\Models\Expense::class)
+            <flux:sidebar.group heading="Finanzas" class="grid">
+                <flux:sidebar.item icon="banknotes" :href="route('finance.expenses')" :current="request()->routeIs('finance.*')" wire:navigate>Gastos</flux:sidebar.item>
+            </flux:sidebar.group>
+        @endcan
         @can('viewAny', App\Models\Product::class)
             <flux:sidebar.group heading="Productos" class="grid">
                 <flux:sidebar.item icon="archive-box" :href="route('supplies')" :current="request()->routeIs('supplies')" wire:navigate>Insumos</flux:sidebar.item>

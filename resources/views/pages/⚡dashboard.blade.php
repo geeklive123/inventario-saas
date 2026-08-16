@@ -7,6 +7,7 @@ use App\Models\StockBalance;
 use App\Models\StockMovement;
 use App\Models\Unit;
 use App\Models\Warehouse;
+use App\Services\Dashboard\BusinessDashboard;
 use App\Support\Authorization\CompanyAccess;
 use App\Support\Tenancy\CurrentCompany;
 use Illuminate\Database\Eloquent\Collection;
@@ -19,6 +20,8 @@ use Livewire\Component;
 new #[Title('Dashboard')] class extends Component
 {
     public ?int $warehouseId = null;
+
+    public string $period = 'today';
 
     public function mount(): void
     {
@@ -80,6 +83,14 @@ new #[Title('Dashboard')] class extends Component
     }
 
     #[Computed]
+    public function business(): array
+    {
+        return app(BusinessDashboard::class)->summary(
+            app(CurrentCompany::class)->membership(), $this->period, $this->warehouseId,
+        );
+    }
+
+    #[Computed]
     public function capabilities(): array
     {
         $access = app(CompanyAccess::class);
@@ -91,6 +102,9 @@ new #[Title('Dashboard')] class extends Component
             'view_inventory' => $access->allowsCurrent($user, 'inventory.view', mutation: false),
             'opening_stock' => $access->allowsCurrent($user, 'inventory.opening'),
             'adjust_stock' => $access->allowsCurrent($user, 'inventory.adjust'),
+            'create_sale' => $access->allowsCurrent($user, 'sales.create'),
+            'create_expense' => $access->allowsCurrent($user, 'finance.expenses.create'),
+            'register_waste' => $access->allowsCurrent($user, 'inventory.waste'),
         ];
     }
 }; ?>
@@ -105,9 +119,14 @@ new #[Title('Dashboard')] class extends Component
     <div class="flex flex-col justify-between gap-4 md:flex-row md:items-end">
         <div>
             <flux:heading size="xl">Hola, {{ auth()->user()->name }}</flux:heading>
-            <flux:text class="mt-1">Resumen real de {{ $company->name }}</flux:text>
+            <flux:text class="mt-1">Resumen de {{ $company->name }}</flux:text>
         </div>
-        <div class="w-full md:w-80">
+        <div class="grid w-full gap-3 md:w-auto md:grid-cols-2">
+            <flux:select wire:model.live="period" label="Período">
+                <flux:select.option value="today">Hoy</flux:select.option>
+                <flux:select.option value="week">Esta semana</flux:select.option>
+                <flux:select.option value="month">Este mes</flux:select.option>
+            </flux:select>
             <flux:select wire:model.live="warehouseId" label="Almacén seleccionado">
                 @forelse ($this->warehouses as $warehouse)
                     <flux:select.option :value="$warehouse->id">{{ $warehouse->branch->name }} · {{ $warehouse->name }}</flux:select.option>
@@ -118,6 +137,24 @@ new #[Title('Dashboard')] class extends Component
         </div>
     </div>
 
+    <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <flux:card><flux:text>Ventas realizadas</flux:text><flux:heading size="xl" class="mt-2">{{ $this->business['sales_count'] }}</flux:heading></flux:card>
+        <flux:card><flux:text>Ramos vendidos</flux:text><flux:heading size="xl" class="mt-2">{{ Number::format((float) $this->business['bouquets_sold'], precision: 0, locale: 'es') }}</flux:heading></flux:card>
+        @if($this->business['visibility']['canViewIncome'])<flux:card><flux:text>Ingresos por ventas</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['income_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading></flux:card>@endif
+        @if($this->business['visibility']['canViewCosts'])<flux:card><flux:text>Costo de ramos vendidos</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['cost_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading></flux:card>@endif
+        @if($this->business['visibility']['canViewProfit'])<flux:card><flux:text>Margen bruto</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['gross_margin_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading></flux:card>@endif
+        @if($this->business['visibility']['canViewIncome'])<flux:card><flux:text>Ticket promedio</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['average_ticket_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading></flux:card>@endif
+        @if($this->business['visibility']['canViewExpenses'])<flux:card><flux:text>Gastos</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['expenses_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading></flux:card>@endif
+        @if($this->business['approximate_result_base'] !== null)<flux:card><flux:text>Resultado aproximado</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['approximate_result_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading></flux:card>@endif
+    </div>
+
+    @if(! $this->business['visibility']['canViewIncome'])
+        <flux:callout icon="user" heading="Tu actividad">Ves tus ventas y ramos registrados. Los importes, costos y resultados requieren acceso financiero.</flux:callout>
+    @endif
+    @if($this->business['stock_alerts'] > 0)
+        <flux:callout color="amber" icon="exclamation-triangle" heading="Hay {{ $this->business['stock_alerts'] }} insumo(s) sin existencia">Revisa el almacén seleccionado antes de registrar nuevas ventas.</flux:callout>
+    @endif
+
     @if (collect($this->capabilities)->contains(true))
         <flux:card>
             <div class="mb-4">
@@ -125,9 +162,11 @@ new #[Title('Dashboard')] class extends Component
                 <flux:text>Continúa con una tarea frecuente.</flux:text>
             </div>
             <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                @if ($this->capabilities['create_sale'])<flux:button class="justify-start" icon="shopping-bag" :href="route('sales.index', ['nueva' => 1])" wire:navigate>Nueva venta</flux:button>@endif
+                @if ($this->capabilities['create_expense'])<flux:button class="justify-start" icon="banknotes" :href="route('finance.expenses')" wire:navigate>Registrar gasto</flux:button>@endif
                 @if ($this->capabilities['create_product'])
-                    <flux:button class="justify-start" icon="plus-circle" :href="route('catalog.products', ['crear' => 'producto'])" wire:navigate>Crear producto</flux:button>
-                    <flux:button class="justify-start" icon="beaker" :href="route('catalog.products', ['crear' => 'preparado'])" wire:navigate>Crear producto preparado</flux:button>
+                    <flux:button class="justify-start" icon="archive-box" :href="route('supplies')" wire:navigate>Nuevo insumo</flux:button>
+                    <flux:button class="justify-start" icon="gift" :href="route('bouquets')" wire:navigate>Nuevo ramo</flux:button>
                 @endif
                 @if ($this->capabilities['adjust_stock'])
                     <flux:button class="justify-start" icon="shopping-cart" :href="route('inventory.stock', ['operacion' => 'inbound'])" wire:navigate>Registrar compra / entrada</flux:button>
@@ -138,6 +177,7 @@ new #[Title('Dashboard')] class extends Component
                 @if ($this->capabilities['view_inventory'])
                     <flux:button class="justify-start" icon="archive-box" :href="route('inventory.stock')" wire:navigate>Ver inventario</flux:button>
                 @endif
+                @if ($this->capabilities['register_waste'])<flux:button class="justify-start" icon="trash" :href="route('inventory.waste')" wire:navigate>Registrar merma</flux:button>@endif
             </div>
         </flux:card>
     @endif
@@ -178,23 +218,22 @@ new #[Title('Dashboard')] class extends Component
         </flux:card>
     @endif
 
-    <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        @foreach ([
-            ['Productos activos', $this->metrics['active_products'], 'cube'],
-            ['Con existencia', $this->metrics['stock_products'], 'archive-box'],
-            ['Productos compuestos', $this->metrics['composed_products'], 'beaker'],
-            ['Valor de inventario', $currency->symbol.' '.Number::format((float) $this->metrics['inventory_value'], precision: $currency->decimal_places, locale: 'es'), 'banknotes'],
-        ] as [$label, $value, $icon])
-            <flux:card wire:key="metric-{{ $label }}" class="flex items-start justify-between gap-4">
-                <div>
-                    <flux:text>{{ $label }}</flux:text>
-                    <flux:heading size="xl" class="mt-2">{{ $value }}</flux:heading>
-                </div>
-                <div class="rounded-xl bg-zinc-100 p-3 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                    <flux:icon :name="$icon" class="size-6" />
-                </div>
+    <div class="grid gap-4 lg:grid-cols-3">
+        <flux:card>
+            <flux:heading size="lg">Ramos más vendidos</flux:heading>
+            <div class="mt-4 space-y-3">@forelse($this->business['top_bouquets'] as $bouquet)<div class="flex justify-between gap-3"><span>{{ $bouquet->product_name }}<flux:text size="sm">{{ Number::format((float) $bouquet->quantity, precision: 0, locale: 'es') }} vendidos</flux:text></span>@if($this->business['visibility']['canViewIncome'])<strong>{{ $currency->symbol }} {{ Number::format((float) $bouquet->total_base, precision: $currency->decimal_places, locale: 'es') }}</strong>@endif</div>@empty<flux:text>Sin ventas en el período.</flux:text>@endforelse</div>
+        </flux:card>
+        @if($this->business['visibility']['canViewIncome'])
+            <flux:card>
+                <flux:heading size="lg">Cobros por forma de pago</flux:heading>
+                <div class="mt-4 space-y-3">@forelse($this->business['payments'] as $method => $total)<div class="flex justify-between gap-3"><span>{{ $method }}</span><strong>{{ $currency->symbol }} {{ Number::format((float) $total, precision: $currency->decimal_places, locale: 'es') }}</strong></div>@empty<flux:text>Sin cobros en el período.</flux:text>@endforelse @if($this->business['mixed_sales_count'])<flux:text size="sm">{{ $this->business['mixed_sales_count'] }} venta(s) tuvieron pagos divididos.</flux:text>@endif</div>
             </flux:card>
-        @endforeach
+        @endif
+        <flux:card>
+            <flux:heading size="lg">Ventas recientes</flux:heading>
+            <div class="mt-4 space-y-3">@forelse($this->business['recent_sales'] as $sale)<a class="block rounded-lg p-2 hover:bg-zinc-50 dark:hover:bg-zinc-800" href="{{ route('sales.show', $sale) }}" wire:navigate><div class="flex justify-between gap-3"><strong>{{ $sale->number }}</strong>@if($this->business['visibility']['canViewIncome'])<strong>{{ $currency->symbol }} {{ Number::format((float) $sale->total_base, precision: $currency->decimal_places, locale: 'es') }}</strong>@endif</div><flux:text size="sm">{{ $sale->occurred_at->timezone($company->timezone)->format('d/m/Y H:i') }} · {{ $sale->items->pluck('product_name')->join(', ') }} · {{ $sale->payments->pluck('payment_method_name')->join(' + ') }} · {{ $sale->confirmedBy->user->name }}</flux:text></a>@empty<flux:text>Sin ventas recientes.</flux:text>@endforelse</div>
+            @can('viewAny', App\Models\Sale::class)<flux:button class="mt-4" size="sm" variant="subtle" :href="route('sales.index')" wire:navigate>Ver todas las ventas</flux:button>@endcan
+        </flux:card>
     </div>
 
     <div class="grid gap-4 lg:grid-cols-3">

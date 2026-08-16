@@ -20,6 +20,7 @@ class DatabaseSeeder extends Seeder
             PermissionSeeder::class,
             CompanyRoleSeeder::class,
             PaymentMethodSeeder::class,
+            ExpenseCategorySeeder::class,
         ]);
     }
 }

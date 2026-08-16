@@ -35,6 +35,16 @@ class ProductPolicy
         return $this->access->allows($user, $product->company, 'catalog.deactivate');
     }
 
+    public function updateBouquetPrice(User $user, Product $product): bool
+    {
+        return $this->access->allows($user, $product->company, 'catalog.bouquets.price.update');
+    }
+
+    public function manageRecipe(User $user, Product $product): bool
+    {
+        return $this->access->allows($user, $product->company, 'catalog.recipes.manage');
+    }
+
     public function delete(User $user, Product $product): bool
     {
         return false;

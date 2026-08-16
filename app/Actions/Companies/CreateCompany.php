@@ -21,6 +21,7 @@ class CreateCompany
     public function __construct(
         private ProvisionDefaultRoles $provisionDefaultRoles,
         private ProvisionDefaultPaymentMethods $provisionDefaultPaymentMethods,
+        private ProvisionDefaultExpenseCategories $provisionDefaultExpenseCategories,
     ) {}
 
     /**
@@ -61,20 +62,21 @@ class CreateCompany
             }
 
             foreach ($modules as $module) {
-                $isCore = $module->code === ModuleCode::Core;
+                $enabledByDefault = in_array($module->code, [ModuleCode::Core, ModuleCode::Finance], true);
 
                 CompanyModule::query()->create([
                     'company_id' => $company->getKey(),
                     'module_id' => $module->getKey(),
-                    'status' => $isCore ? CompanyModuleStatus::Enabled : CompanyModuleStatus::Disabled,
-                    'enabled_at' => $isCore ? now() : null,
-                    'disabled_at' => $isCore ? null : now(),
-                    'enabled_by_membership_id' => $isCore ? $membership->getKey() : null,
+                    'status' => $enabledByDefault ? CompanyModuleStatus::Enabled : CompanyModuleStatus::Disabled,
+                    'enabled_at' => $enabledByDefault ? now() : null,
+                    'disabled_at' => $enabledByDefault ? null : now(),
+                    'enabled_by_membership_id' => $enabledByDefault ? $membership->getKey() : null,
                 ]);
             }
 
             $this->provisionDefaultRoles->handle($company);
             $this->provisionDefaultPaymentMethods->handle($company);
+            $this->provisionDefaultExpenseCategories->handle($company);
 
             return $company->load(['baseCurrency', 'memberships', 'roles', 'companyModules.module', 'paymentMethods']);
         }, attempts: 3);

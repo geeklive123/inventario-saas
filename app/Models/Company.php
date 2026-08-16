@@ -116,6 +116,18 @@ class Company extends Model
         return $this->hasMany(Sale::class);
     }
 
+    /** @return HasMany<ExpenseCategory, $this> */
+    public function expenseCategories(): HasMany
+    {
+        return $this->hasMany(ExpenseCategory::class);
+    }
+
+    /** @return HasMany<Expense, $this> */
+    public function expenses(): HasMany
+    {
+        return $this->hasMany(Expense::class);
+    }
+
     /** @return array<string, string> */
     protected function casts(): array
     {

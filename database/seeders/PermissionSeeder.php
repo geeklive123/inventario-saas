@@ -42,6 +42,8 @@ class PermissionSeeder extends Seeder
                 'catalog.create' => 'Create catalog products',
                 'catalog.update' => 'Update catalog products',
                 'catalog.deactivate' => 'Deactivate catalog products',
+                'catalog.bouquets.price.update' => 'Update bouquet prices',
+                'catalog.recipes.manage' => 'Manage bouquet recipes',
             ],
             ModuleCode::Inventory->value => [
                 'inventory.view' => 'View inventory',
@@ -55,6 +57,16 @@ class PermissionSeeder extends Seeder
                 'sales.create' => 'Create sales',
                 'sales.void' => 'Void sales',
                 'sales.manage' => 'Manage sales (legacy)',
+                'sales.costs.view' => 'View sales costs',
+                'sales.profits.view' => 'View sales profits',
+            ],
+            ModuleCode::Finance->value => [
+                'finance.sales_income.view' => 'View sales income',
+                'finance.expenses.view' => 'View expenses',
+                'finance.expenses.create' => 'Create expenses',
+                'finance.expenses.update' => 'Update expenses',
+                'finance.expenses.cancel' => 'Cancel expenses',
+                'finance.expense_categories.manage' => 'Manage expense categories',
             ],
             ModuleCode::Cash->value => [
                 'cash.view' => 'View cash',

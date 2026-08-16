@@ -51,7 +51,7 @@ new #[Title('Recetas')] class extends Component
     public function openDraft(): void
     {
         $product = Product::query()->findOrFail($this->selectedProductId);
-        Gate::authorize('update', $product);
+        Gate::authorize('manageRecipe', $product);
         $this->resetDraft();
         Flux::modal('recipe-draft')->show();
     }
@@ -70,7 +70,7 @@ new #[Title('Recetas')] class extends Component
     public function activateDraft(): void
     {
         $product = Product::query()->findOrFail($this->selectedProductId);
-        Gate::authorize('update', $product);
+        Gate::authorize('manageRecipe', $product);
         $data = $this->validate([
             'components' => ['required', 'array', 'min:1'],
             'components.*.component_id' => ['required', 'integer', 'distinct'],

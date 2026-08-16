@@ -36,6 +36,11 @@ Route::middleware(['auth', 'password.changed'])->group(function () {
             Route::livewire('{saleId}', 'pages::sales.show')->whereNumber('saleId')->name('show');
         });
 
+        Route::middleware(['module:finance', 'permission:finance.expenses.view'])
+            ->prefix('finanzas')->name('finance.')->group(function () {
+                Route::livewire('gastos', 'pages::finance.expenses')->name('expenses');
+            });
+
         Route::livewire('usuarios', 'pages::users')
             ->middleware('permission:core.users.view')
             ->name('users.index');

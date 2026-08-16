@@ -151,3 +151,39 @@ test('bouquet cost does not read stock from another company', function () {
         $second['warehouse'],
     ))->toThrow(DomainException::class, 'same company');
 });
+
+test('editing bouquet commercial data and price preserves its active recipe', function () {
+    $context = bouquetCostContext();
+    $supply = Product::factory()->create([
+        'company_id' => $context['company']->getKey(),
+        'unit_id' => $context['unit']->getKey(),
+        'name' => 'Rosa',
+        'sku' => 'ROSA-EDICION',
+        'is_sellable' => false,
+    ]);
+    $bouquet = Product::factory()->composed()->create([
+        'company_id' => $context['company']->getKey(),
+        'unit_id' => $context['unit']->getKey(),
+        'name' => 'Ramo Original',
+        'sku' => 'RAMO-EDICION',
+        'sale_price_base' => 80,
+        'is_sellable' => true,
+    ]);
+    $recipe = app(CreateProductRecipe::class)->handle($context['membership'], $bouquet, 1, [
+        ['product' => $supply, 'quantity' => 2],
+    ]);
+
+    Livewire::actingAs($context['user'])->test('pages::bouquets')
+        ->call('edit', $bouquet->getKey())
+        ->set('name', 'Ramo Renovado')
+        ->set('salePriceBase', '95')
+        ->set('isActive', false)
+        ->call('save')
+        ->assertHasNoErrors();
+
+    expect($bouquet->refresh()->name)->toBe('Ramo Renovado')
+        ->and($bouquet->sale_price_base)->toBe('95.0000')
+        ->and($bouquet->is_active)->toBeFalse()
+        ->and($bouquet->recipes()->count())->toBe(1)
+        ->and($bouquet->recipes()->where('active_slot', 1)->sole()->getKey())->toBe($recipe->getKey());
+});

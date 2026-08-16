@@ -26,7 +26,7 @@ class CreateProductRecipe
         int|float|string $yieldQuantity,
         array $components,
     ): ProductRecipe {
-        if (! $this->access->allows($actor->user, $actor->company, 'catalog.update')) {
+        if (! $this->access->allows($actor->user, $actor->company, 'catalog.recipes.manage')) {
             throw new DomainException('The membership actor is not authorized.');
         }
 

@@ -8,5 +8,6 @@ enum ModuleCode: string
     case Catalog = 'catalog';
     case Inventory = 'inventory';
     case Sales = 'sales';
+    case Finance = 'finance';
     case Cash = 'cash';
 }

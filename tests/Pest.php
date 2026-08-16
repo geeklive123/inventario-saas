@@ -1,5 +1,14 @@
 <?php
 
+use App\Actions\Companies\CreateCompany;
+use App\Actions\Modules\SetModuleStatus;
+use App\Enums\CompanyModuleStatus;
+use App\Enums\ModuleCode;
+use App\Models\Company;
+use App\Models\Currency;
+use App\Models\Membership;
+use App\Models\Module;
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -47,4 +56,24 @@ expect()->extend('toBeOne', function () {
 function something()
 {
     // ..
+}
+
+/** @return array{owner: User, company: Company, membership: Membership, finance: Module} */
+function expenseContext(string $name = 'Florería Gastos'): array
+{
+    $owner = User::factory()->create();
+    $company = app(CreateCompany::class)->handle($owner, [
+        'name' => $name,
+        'base_currency_id' => Currency::query()->where('code', 'BOB')->value('id'),
+        'timezone' => 'America/La_Paz',
+        'locale' => 'es',
+    ]);
+    $membership = Membership::query()->withoutGlobalScope('company')
+        ->where('company_id', $company->getKey())->where('user_id', $owner->getKey())->firstOrFail();
+    $finance = Module::query()->where('code', ModuleCode::Finance)->firstOrFail();
+    app(SetModuleStatus::class)->handle(
+        $membership, $finance, CompanyModuleStatus::Enabled,
+    );
+
+    return compact('owner', 'company', 'membership', 'finance');
 }

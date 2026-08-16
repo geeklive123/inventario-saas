@@ -92,6 +92,12 @@ class Membership extends Model
         return $this->hasMany(Sale::class, 'voided_by_membership_id');
     }
 
+    /** @return HasMany<Expense, $this> */
+    public function expenses(): HasMany
+    {
+        return $this->hasMany(Expense::class);
+    }
+
     public function isActive(): bool
     {
         return $this->status === MembershipStatus::Active;

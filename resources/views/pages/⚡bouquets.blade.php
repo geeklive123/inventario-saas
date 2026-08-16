@@ -39,6 +39,10 @@ new #[Title('Ramos')] class extends Component
 
     public ?int $warehouseId = null;
 
+    public ?int $editingId = null;
+
+    public bool $isActive = true;
+
     public function mount(): void
     {
         if (! $this->canViewCosts()) {
@@ -68,18 +72,38 @@ new #[Title('Ramos')] class extends Component
         Flux::modal('bouquet-form')->show();
     }
 
+    public function edit(int $bouquetId): void
+    {
+        $bouquet = Product::query()->composed()->sellable()->findOrFail($bouquetId);
+        Gate::authorize('update', $bouquet);
+        $this->editingId = $bouquet->getKey();
+        $this->name = $bouquet->name;
+        $this->sku = $bouquet->sku;
+        $this->salePriceBase = $bouquet->sale_price_base;
+        $this->description = $bouquet->description ?? '';
+        $this->unitId = $bouquet->unit_id;
+        $this->isActive = $bouquet->is_active;
+        Flux::modal('bouquet-form')->show();
+    }
+
     public function save(): void
     {
-        Gate::authorize('create', Product::class);
         $companyId = app(CurrentCompany::class)->id();
+        $bouquet = $this->editingId ? Product::query()->composed()->sellable()->findOrFail($this->editingId) : null;
+        $bouquet ? Gate::authorize('update', $bouquet) : Gate::authorize('create', Product::class);
         $data = $this->validate([
             'name' => ['required', 'string', 'max:255'],
-            'sku' => ['required', 'string', 'max:100', Rule::unique('products', 'sku')->where('company_id', $companyId)],
+            'sku' => ['required', 'string', 'max:100', Rule::unique('products', 'sku')->where('company_id', $companyId)->ignore($bouquet?->getKey())],
             'salePriceBase' => ['required', 'numeric', 'min:0'],
             'description' => ['nullable', 'string'],
             'unitId' => ['required', Rule::exists('units', 'id')->where('company_id', $companyId)],
+            'isActive' => ['boolean'],
         ]);
-        $bouquet = Product::query()->create([
+        if ($bouquet && bccomp($bouquet->sale_price_base, (string) $data['salePriceBase'], 4) !== 0) {
+            Gate::authorize('updateBouquetPrice', $bouquet);
+        }
+
+        $attributes = [
             'company_id' => $companyId,
             'unit_id' => $data['unitId'],
             'name' => $data['name'],
@@ -89,12 +113,18 @@ new #[Title('Ramos')] class extends Component
             'item_type' => ProductItemType::Physical,
             'inventory_behavior' => InventoryBehavior::Components,
             'is_sellable' => true,
-            'is_active' => true,
-        ]);
+            'is_active' => $data['isActive'],
+        ];
+        $bouquet ? $bouquet->update($attributes) : $bouquet = Product::query()->create($attributes);
 
         Flux::modal('bouquet-form')->close();
-        session()->flash('success', 'Ramo creado. Ahora indica qué utiliza.');
-        $this->redirectRoute('catalog.recipes', ['producto' => $bouquet->getKey()], navigate: true);
+        if ($this->editingId) {
+            Flux::toast('Ramo actualizado.', variant: 'success');
+            $this->resetForm();
+        } else {
+            session()->flash('success', 'Ramo creado. Ahora indica qué utiliza.');
+            $this->redirectRoute('catalog.recipes', ['producto' => $bouquet->getKey()], navigate: true);
+        }
     }
 
     public function formatMoney(int|float|string $amount): string
@@ -158,8 +188,9 @@ new #[Title('Ramos')] class extends Component
 
     private function resetForm(): void
     {
-        $this->reset(['name', 'sku', 'description', 'unitId']);
+        $this->reset(['name', 'sku', 'description', 'unitId', 'editingId']);
         $this->salePriceBase = '0';
+        $this->isActive = true;
         $this->resetValidation();
     }
 }; ?>
@@ -214,7 +245,7 @@ new #[Title('Ramos')] class extends Component
                     </div>
                     <div>
                         <flux:text size="sm">Costo del ramo</flux:text>
-                        <div class="font-semibold">{{ $cost && $cost['complete'] ? $currency->symbol.' '.$this->formatMoney($cost['cost_base']) : 'Pendiente' }}</div>
+                        <div class="font-semibold">{{ $cost && $cost['complete'] ? $currency->symbol.' '.$this->formatMoney($cost['cost_base']) : 'No calculado' }}</div>
                     </div>
                     @if ($margin !== null)
                         <div class="col-span-2 border-t border-zinc-200 pt-3 dark:border-zinc-700">
@@ -222,14 +253,15 @@ new #[Title('Ramos')] class extends Component
                             <div class="font-semibold {{ bccomp($margin, '0', 4) < 0 ? 'text-red-600 dark:text-red-400' : 'text-green-700 dark:text-green-400' }}">{{ $currency->symbol }} {{ $this->formatMoney($margin) }}</div>
                         </div>
                     @elseif ($cost && $cost['has_recipe'] && $cost['missing_costs'] !== [])
-                        <flux:text class="col-span-2" size="sm">Registra una entrada o costo de referencia para: {{ implode(', ', $cost['missing_costs']) }}.</flux:text>
+                        <flux:callout class="col-span-2" icon="exclamation-triangle" heading="Falta costo en algunos insumos">Registra una entrada o costo de referencia para: {{ implode(', ', $cost['missing_costs']) }}. El ramo puede mantenerse a la venta, pero el margen no se calculará hasta completar estos costos.</flux:callout>
                     @endif
                     @if ($cost && $cost['complete'] && $cost['uses_fallback'])
                         <div class="col-span-2"><flux:badge color="amber">Incluye costos de referencia</flux:badge></div>
                     @endif
                 </div>
 
-                <div class="mt-5 flex justify-end">
+                <div class="mt-5 flex justify-end gap-2">
+                    @can('update', $bouquet)<flux:button variant="ghost" wire:click="edit({{ $bouquet->id }})">Editar datos y precio</flux:button>@endcan
                     <flux:button :href="route('catalog.recipes', ['producto' => $bouquet->id])" wire:navigate>{{ $bouquet->has_active_recipe ? 'Ver o cambiar receta' : 'Indicar qué utiliza' }}</flux:button>
                 </div>
             </flux:card>
@@ -248,8 +280,8 @@ new #[Title('Ramos')] class extends Component
     <flux:modal name="bouquet-form" class="max-w-2xl">
         <form wire:submit="save" class="space-y-5">
             <div>
-                <flux:heading size="lg">Nuevo ramo</flux:heading>
-                <flux:text>Después de guardarlo indicarás qué insumos utiliza.</flux:text>
+                <flux:heading size="lg">{{ $editingId ? 'Editar ramo' : 'Nuevo ramo' }}</flux:heading>
+                <flux:text>{{ $editingId ? 'Actualiza sus datos comerciales. La receta se administra por separado.' : 'Después de guardarlo indicarás qué insumos utiliza.' }}</flux:text>
             </div>
             <div class="grid gap-4 md:grid-cols-2">
                 <flux:input wire:model="name" label="Nombre del ramo" required />
@@ -263,9 +295,10 @@ new #[Title('Ramos')] class extends Component
                 <flux:input wire:model="salePriceBase" type="number" step="0.0001" min="0" label="Precio de venta ({{ $currency->code }})" />
             </div>
             <flux:textarea wire:model="description" label="Descripción" />
+            @if($editingId)<flux:switch wire:model="isActive" label="Ramo activo" description="Los ramos inactivos dejan de aparecer para nuevas ventas." />@endif
             <div class="flex justify-end gap-3">
                 <flux:modal.close><flux:button variant="ghost">Cancelar</flux:button></flux:modal.close>
-                <flux:button type="submit" variant="primary">Crear y configurar receta</flux:button>
+                <flux:button type="submit" variant="primary">{{ $editingId ? 'Guardar cambios' : 'Crear y configurar receta' }}</flux:button>
             </div>
         </form>
     </flux:modal>
