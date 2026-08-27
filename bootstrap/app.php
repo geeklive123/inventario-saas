@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Middleware\EnsureAnyPermission;
 use App\Http\Middleware\EnsureModuleEnabled;
 use App\Http\Middleware\EnsurePasswordChanged;
 use App\Http\Middleware\EnsurePermission;
@@ -19,6 +20,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'company' => ResolveCurrentCompany::class,
             'module' => EnsureModuleEnabled::class,
+            'permission.any' => EnsureAnyPermission::class,
             'permission' => EnsurePermission::class,
             'password.changed' => EnsurePasswordChanged::class,
         ]);

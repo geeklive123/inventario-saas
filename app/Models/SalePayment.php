@@ -10,7 +10,14 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-#[Fillable(['company_id', 'sale_id', 'payment_method_id', 'payment_method_name', 'amount_base'])]
+/**
+ * @property string $payment_method_name
+ * @property numeric-string $amount_base
+ */
+#[Fillable([
+    'company_id', 'sale_id', 'payment_method_id', 'payment_method_name',
+    'received_by_membership_id', 'amount_base', 'occurred_at',
+])]
 class SalePayment extends Model
 {
     use BelongsToCompany;
@@ -32,9 +39,18 @@ class SalePayment extends Model
         return $this->belongsTo(PaymentMethod::class);
     }
 
+    /** @return BelongsTo<Membership, $this> */
+    public function receivedBy(): BelongsTo
+    {
+        return $this->belongsTo(Membership::class, 'received_by_membership_id');
+    }
+
     /** @return array<string, string> */
     protected function casts(): array
     {
-        return ['amount_base' => 'decimal:4'];
+        return [
+            'amount_base' => 'decimal:4',
+            'occurred_at' => 'datetime',
+        ];
     }
 }

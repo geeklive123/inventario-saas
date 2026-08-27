@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\ReportExportController;
 use Illuminate\Support\Facades\Route;
 
 Route::redirect('/', '/login')->name('home');
@@ -40,6 +41,14 @@ Route::middleware(['auth', 'password.changed'])->group(function () {
             ->prefix('finanzas')->name('finance.')->group(function () {
                 Route::livewire('gastos', 'pages::finance.expenses')->name('expenses');
             });
+
+        Route::livewire('reportes', 'pages::reports.index')
+            ->middleware('permission.any:reports.sales.view,reports.inventory.view,reports.expenses.view,reports.financial.view')
+            ->name('reports.index');
+        Route::get('reportes/exportar/{format}', ReportExportController::class)
+            ->whereIn('format', ['pdf', 'xlsx'])
+            ->middleware('permission.any:reports.sales.view,reports.inventory.view,reports.expenses.view,reports.financial.view')
+            ->name('reports.export');
 
         Route::livewire('usuarios', 'pages::users')
             ->middleware('permission:core.users.view')

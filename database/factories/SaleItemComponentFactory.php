@@ -27,10 +27,13 @@ class SaleItemComponentFactory extends Factory
             'product_sku' => fake()->unique()->bothify('INS-####'),
             'unit_symbol' => 'UND',
             'recipe_quantity' => 1,
+            'customization_quantity' => 0,
             'waste_percentage' => 0,
             'quantity_consumed' => 1,
+            'customization_quantity_consumed' => 0,
             'unit_cost_base' => 5,
             'total_cost_base' => 5,
+            'customization_total_cost_base' => 0,
         ];
     }
 }

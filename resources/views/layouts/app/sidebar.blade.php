@@ -19,6 +19,11 @@
                 <flux:sidebar.item icon="banknotes" :href="route('finance.expenses')" :current="request()->routeIs('finance.*')" wire:navigate>Gastos</flux:sidebar.item>
             </flux:sidebar.group>
         @endcan
+        @if(app(App\Support\Authorization\ReportAccess::class)->canViewAnyCurrent(auth()->user()))
+            <flux:sidebar.group heading="Análisis" class="grid">
+                <flux:sidebar.item icon="chart-bar-square" :href="route('reports.index')" :current="request()->routeIs('reports.*')" wire:navigate>Reportes</flux:sidebar.item>
+            </flux:sidebar.group>
+        @endif
         @can('viewAny', App\Models\Product::class)
             <flux:sidebar.group heading="Productos" class="grid">
                 <flux:sidebar.item icon="archive-box" :href="route('supplies')" :current="request()->routeIs('supplies')" wire:navigate>Insumos</flux:sidebar.item>

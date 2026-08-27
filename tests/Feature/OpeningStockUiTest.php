@@ -65,5 +65,5 @@ test('opening stock selector excludes supplies with historical opening even when
         ->get(route('inventory.stock').'?operacion=opening')
         ->assertSuccessful()
         ->assertSee('Todos los insumos ya tienen una existencia inicial registrada.')
-        ->assertSee('Para agregar nuevas unidades utiliza Registrar compra / entrada.');
+        ->assertSee('Para agregar nuevas unidades utiliza Registrar compra.');
 });

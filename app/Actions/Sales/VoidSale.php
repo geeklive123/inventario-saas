@@ -3,6 +3,7 @@
 namespace App\Actions\Sales;
 
 use App\Enums\ModuleCode;
+use App\Enums\SaleOrderStatus;
 use App\Enums\SaleStatus;
 use App\Enums\SaleStockMovementKind;
 use App\Models\Membership;
@@ -52,6 +53,10 @@ class VoidSale
                 throw new DomainException('La venta ya está anulada.');
             }
 
+            if (bccomp($lockedSale->paid_total_base, '0', 4) === 1) {
+                throw new DomainException('No se puede anular una venta cobrada sin registrar antes una devolución.');
+            }
+
             $link = SaleStockMovement::query()
                 ->withoutGlobalScope('company')
                 ->where('company_id', $actor->company_id)
@@ -79,13 +84,15 @@ class VoidSale
             ]);
             $lockedSale->update([
                 'status' => SaleStatus::Voided,
+                'order_status' => SaleOrderStatus::Cancelled,
                 'voided_by_membership_id' => $actor->getKey(),
                 'voided_at' => $occurredAt ?? now(),
                 'void_reason' => $reason,
             ]);
 
             return $lockedSale->load([
-                'items.components', 'payments', 'stockMovementLinks.stockMovement.lines.product',
+                'items.components', 'extraLines', 'payments.receivedBy.user',
+                'stockMovementLinks.stockMovement.lines.product',
                 'confirmedBy.user', 'voidedBy.user',
             ]);
         }, attempts: 3);

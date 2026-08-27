@@ -2,7 +2,9 @@
 
 namespace Database\Factories;
 
+use App\Enums\ExpenseReceiptType;
 use App\Enums\ExpenseStatus;
+use App\Enums\ExpenseType;
 use App\Models\Branch;
 use App\Models\Company;
 use App\Models\Expense;
@@ -27,7 +29,9 @@ class ExpenseFactory extends Factory
             'company_id' => Company::factory(),
             'sequence_number' => fake()->unique()->numberBetween(1, 999999),
             'number' => fn (array $attributes) => 'G-'.str_pad((string) $attributes['sequence_number'], 6, '0', STR_PAD_LEFT),
+            'type' => ExpenseType::Indirect,
             'branch_id' => fn (array $attributes) => Branch::factory()->create(['company_id' => $attributes['company_id']])->getKey(),
+            'sale_id' => null,
             'membership_id' => fn (array $attributes) => Membership::factory()->create(['company_id' => $attributes['company_id']])->getKey(),
             'expense_category_id' => fn (array $attributes) => ExpenseCategory::factory()->create(['company_id' => $attributes['company_id']])->getKey(),
             'payment_method_id' => fn (array $attributes) => PaymentMethod::factory()->create(['company_id' => $attributes['company_id']])->getKey(),
@@ -35,6 +39,8 @@ class ExpenseFactory extends Factory
             'payment_method_name' => fake()->word(),
             'branch_name' => fake()->words(2, true),
             'reference' => fake()->optional()->numerify('REF-####'),
+            'receipt_type' => ExpenseReceiptType::WithoutInvoice,
+            'invoice_number' => null,
             'concept' => fake()->sentence(3),
             'amount_base' => fake()->randomFloat(4, 1, 1000),
             'occurred_at' => now(),

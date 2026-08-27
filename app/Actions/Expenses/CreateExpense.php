@@ -2,6 +2,7 @@
 
 namespace App\Actions\Expenses;
 
+use App\Enums\ExpenseReceiptType;
 use App\Enums\ExpenseStatus;
 use App\Enums\MembershipStatus;
 use App\Models\Branch;
@@ -11,6 +12,7 @@ use App\Models\ExpenseCategory;
 use App\Models\Membership;
 use App\Models\PaymentMethod;
 use App\Support\Authorization\CompanyAccess;
+use App\Support\Decimal;
 use Carbon\CarbonInterface;
 use DomainException;
 use Illuminate\Support\Facades\DB;
@@ -29,17 +31,25 @@ class CreateExpense
         ?string $reference = null,
         ?string $notes = null,
         ?CarbonInterface $occurredAt = null,
+        ExpenseReceiptType $receiptType = ExpenseReceiptType::WithoutInvoice,
+        ?string $invoiceNumber = null,
     ): Expense {
         $this->authorize($actor);
         $this->validateReferences($actor, $category, $branch, $paymentMethod);
 
-        $amount = number_format((float) $amountBase, 4, '.', '');
+        $amount = Decimal::normalize($amountBase, 4);
 
         if (bccomp($amount, '0', 4) !== 1 || trim($concept) === '') {
             throw new DomainException('El gasto requiere un concepto y un importe mayor a cero.');
         }
 
-        return DB::transaction(function () use ($actor, $category, $amount, $concept, $branch, $paymentMethod, $reference, $notes, $occurredAt): Expense {
+        $invoiceNumber = filled($invoiceNumber) ? trim((string) $invoiceNumber) : null;
+
+        if ($receiptType === ExpenseReceiptType::WithInvoice && $invoiceNumber === null) {
+            throw new DomainException('El número de factura es obligatorio cuando el gasto tiene factura.');
+        }
+
+        return DB::transaction(function () use ($actor, $category, $amount, $concept, $branch, $paymentMethod, $reference, $notes, $occurredAt, $receiptType, $invoiceNumber): Expense {
             $company = Company::query()->whereKey($actor->company_id)->lockForUpdate()->firstOrFail();
             $lockedActor = Membership::query()->withoutGlobalScope('company')
                 ->whereKey($actor->getKey())->where('company_id', $company->getKey())->lockForUpdate()->firstOrFail();
@@ -60,6 +70,8 @@ class CreateExpense
                 'payment_method_name' => $paymentMethod?->name,
                 'branch_name' => $branch?->name,
                 'reference' => filled($reference) ? trim((string) $reference) : null,
+                'receipt_type' => $receiptType,
+                'invoice_number' => $receiptType === ExpenseReceiptType::WithInvoice ? $invoiceNumber : null,
                 'concept' => trim($concept),
                 'amount_base' => $amount,
                 'occurred_at' => $occurredAt ?? now(),

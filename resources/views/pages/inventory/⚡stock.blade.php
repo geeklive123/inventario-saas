@@ -211,8 +211,8 @@ new #[Title('Inventario')] class extends Component
         Flux::modal('stock-operation')->close();
         $this->showOperationModal = false;
         Flux::toast(variant: 'success', text: match ($data['operation']) {
-            'opening' => 'Existencia inicial cargada correctamente.',
-            'inbound' => 'Compra o entrada registrada. El costo promedio fue actualizado.',
+            'opening' => 'Stock inicial cargado correctamente.',
+            'inbound' => 'Compra registrada. El costo promedio fue actualizado.',
             'outbound' => 'Salida registrada correctamente.',
             default => 'Existencia corregida y movimiento registrado.',
         });
@@ -353,12 +353,12 @@ new #[Title('Inventario')] class extends Component
         @if ($this->canOpen || $this->canAdjust)
             <div class="flex flex-wrap gap-2">
                 @if ($this->canOpen)
-                    <flux:button variant="primary" icon="archive-box-arrow-down" wire:click="openOperation('opening')">Cargar existencia inicial</flux:button>
+                    <flux:button variant="primary" icon="archive-box-arrow-down" wire:click="openOperation('opening')">Cargar stock inicial</flux:button>
                 @endif
                 @if ($this->canAdjust)
-                    <flux:button icon="shopping-cart" wire:click="openOperation('inbound')">Registrar compra / entrada</flux:button>
+                    <flux:button icon="shopping-cart" wire:click="openOperation('inbound')">Registrar compra</flux:button>
                     <flux:button icon="arrow-up-tray" wire:click="openOperation('outbound')">Registrar salida</flux:button>
-                    <flux:button icon="scale" wire:click="openOperation('adjustment')">Corregir existencia</flux:button>
+                    <flux:button icon="scale" wire:click="openOperation('adjustment')">Ajustar stock</flux:button>
                 @endif
             </div>
         @endif
@@ -378,7 +378,7 @@ new #[Title('Inventario')] class extends Component
             @endforeach
         </flux:select>
         <flux:input wire:model.live.debounce.300ms="search" label="Buscar" icon="magnifying-glass" placeholder="Insumo o SKU" />
-        <flux:select wire:model.live="stockFilter" label="Existencia">
+        <flux:select wire:model.live="stockFilter" label="Cantidad disponible">
             <flux:select.option value="">Todas</flux:select.option>
             <flux:select.option value="positive">Disponible</flux:select.option>
             <flux:select.option value="zero">Agotada</flux:select.option>
@@ -391,28 +391,34 @@ new #[Title('Inventario')] class extends Component
             <flux:table :paginate="$this->balances">
                 <flux:table.columns>
                     <flux:table.column>Insumo</flux:table.column>
-                    <flux:table.column align="end">Existencia</flux:table.column>
+                    <flux:table.column align="end">Cantidad disponible</flux:table.column>
                     <flux:table.column align="end">
                         <span class="inline-flex items-center justify-end gap-1">
-                            Costo promedio
-                            <flux:tooltip content="Precio promedio de las unidades que actualmente tienes en inventario." toggleable>
-                                <flux:icon.information-circle class="size-4 text-zinc-400" />
+                            Costo promedio actual
+                            <flux:tooltip content="Es el costo promedio por unidad considerando todas las compras registradas." toggleable>
+                                <button type="button" aria-label="Información sobre el costo promedio actual" class="rounded text-zinc-400 outline-none hover:text-zinc-700 focus-visible:ring-2 focus-visible:ring-zinc-500 dark:hover:text-zinc-200">
+                                    <flux:icon.information-circle class="size-4" />
+                                </button>
                             </flux:tooltip>
                         </span>
                     </flux:table.column>
                     <flux:table.column align="end">
                         <span class="inline-flex items-center justify-end gap-1">
-                            Valor del inventario
-                            <flux:tooltip content="Existencia actual × costo promedio." toggleable>
-                                <flux:icon.information-circle class="size-4 text-zinc-400" />
+                            Valor total en stock
+                            <flux:tooltip content="Es cuánto vale actualmente todo el stock disponible de este insumo." toggleable>
+                                <button type="button" aria-label="Información sobre el valor total en stock" class="rounded text-zinc-400 outline-none hover:text-zinc-700 focus-visible:ring-2 focus-visible:ring-zinc-500 dark:hover:text-zinc-200">
+                                    <flux:icon.information-circle class="size-4" />
+                                </button>
                             </flux:tooltip>
                         </span>
                     </flux:table.column>
                     <flux:table.column align="end">
                         <span class="inline-flex items-center justify-end gap-1">
-                            Último costo de compra
-                            <flux:tooltip content="Precio unitario registrado en la última compra o entrada con costo." toggleable>
-                                <flux:icon.information-circle class="size-4 text-zinc-400" />
+                            Último precio pagado
+                            <flux:tooltip content="Es el precio por unidad de la compra más reciente." toggleable>
+                                <button type="button" aria-label="Información sobre el último precio pagado" class="rounded text-zinc-400 outline-none hover:text-zinc-700 focus-visible:ring-2 focus-visible:ring-zinc-500 dark:hover:text-zinc-200">
+                                    <flux:icon.information-circle class="size-4" />
+                                </button>
                             </flux:tooltip>
                         </span>
                     </flux:table.column>
@@ -445,7 +451,7 @@ new #[Title('Inventario')] class extends Component
                             <flux:table.cell colspan="6">
                                 <div class="py-12 text-center">
                                     <flux:heading>Sin existencias registradas</flux:heading>
-                                    <flux:text>Selecciona un almacén y carga la existencia inicial de tus insumos.</flux:text>
+                                    <flux:text>Selecciona un almacén y carga el stock inicial de tus insumos.</flux:text>
                                 </div>
                             </flux:table.cell>
                         </flux:table.row>
@@ -459,7 +465,7 @@ new #[Title('Inventario')] class extends Component
         <flux:modal name="stock-operation" wire:model.self="showOperationModal" class="max-w-2xl">
             <form wire:submit="submitOperation" class="space-y-5">
                 <div>
-                    <flux:heading size="lg">{{ match ($operation) { 'opening' => 'Cargar existencia inicial', 'inbound' => 'Registrar compra / entrada', 'outbound' => 'Registrar salida', default => 'Corregir existencia' } }}</flux:heading>
+                    <flux:heading size="lg">{{ match ($operation) { 'opening' => 'Cargar stock inicial', 'inbound' => 'Registrar compra', 'outbound' => 'Registrar salida', default => 'Ajustar stock' } }}</flux:heading>
                     <flux:text>{{ match ($operation) { 'opening' => 'Indica cuánto inventario tienes actualmente y cuánto te costó realmente cada unidad.', 'inbound' => 'Registra las flores o materiales que compraste para actualizar el costo promedio.', 'outbound' => 'Usa esta opción para consumos internos o salidas que no sean mermas ni ventas de ramos.', default => 'Utiliza esta opción cuando el inventario físico no coincide con el sistema.' } }}</flux:text>
                 </div>
 
@@ -469,7 +475,7 @@ new #[Title('Inventario')] class extends Component
 
                 @if ($operation === 'opening' && $this->products->isEmpty())
                     <flux:callout icon="check-circle" heading="Todos los insumos ya tienen una existencia inicial registrada.">
-                        Para agregar nuevas unidades utiliza Registrar compra / entrada.
+                        Para agregar nuevas unidades utiliza Registrar compra.
                     </flux:callout>
                 @else
                     <flux:select wire:model.live="productId" label="Insumo" required>

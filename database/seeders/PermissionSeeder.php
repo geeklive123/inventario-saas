@@ -51,6 +51,7 @@ class PermissionSeeder extends Seeder
                 'inventory.adjust' => 'Adjust inventory',
                 'inventory.reverse' => 'Reverse inventory movements',
                 'inventory.waste' => 'Register inventory waste',
+                'reports.inventory.view' => 'View inventory reports',
             ],
             ModuleCode::Sales->value => [
                 'sales.view' => 'View sales',
@@ -59,6 +60,11 @@ class PermissionSeeder extends Seeder
                 'sales.manage' => 'Manage sales (legacy)',
                 'sales.costs.view' => 'View sales costs',
                 'sales.profits.view' => 'View sales profits',
+                'sales.balances.view' => 'View outstanding sale balances',
+                'sales.payments.create' => 'Register sale payments',
+                'sales.extras.manage' => 'Manage sale extras',
+                'sales.extras.price.update' => 'Override sale extra prices',
+                'reports.sales.view' => 'View sales reports',
             ],
             ModuleCode::Finance->value => [
                 'finance.sales_income.view' => 'View sales income',
@@ -67,6 +73,8 @@ class PermissionSeeder extends Seeder
                 'finance.expenses.update' => 'Update expenses',
                 'finance.expenses.cancel' => 'Cancel expenses',
                 'finance.expense_categories.manage' => 'Manage expense categories',
+                'reports.expenses.view' => 'View expense reports',
+                'reports.financial.view' => 'View financial reports',
             ],
             ModuleCode::Cash->value => [
                 'cash.view' => 'View cash',

@@ -1,0 +1,22 @@
+@page { margin: 22mm 12mm 18mm; }
+body { color: #28352f; font-family: "DejaVu Sans", sans-serif; font-size: 9px; line-height: 1.35; }
+footer { bottom: -12mm; color: #68756e; font-size: 8px; left: 0; position: fixed; right: 0; text-align: center; }
+.page-number::after { content: counter(page); }
+.new-page { page-break-before: always; }
+header { border-bottom: 2px solid #365849; margin-bottom: 14px; padding-bottom: 10px; }
+.company { color: #365849; font-size: 11px; font-weight: bold; letter-spacing: .4px; text-transform: uppercase; }
+h1 { color: #243c31; font-size: 22px; margin: 3px 0 8px; }
+h2 { color: #365849; font-size: 13px; margin: 14px 0 6px; }
+table { border-collapse: collapse; width: 100%; }
+.metadata td { color: #56635d; padding: 2px 12px 2px 0; width: 50%; }
+.metrics { border-collapse: separate; border-spacing: 5px; margin: 0 -5px 12px; }
+.metrics td { background: #f1f5f2; border: 1px solid #d8e2dc; padding: 8px; vertical-align: top; width: 25%; }
+.metric-label { color: #68756e; font-size: 8px; }
+.metric-value { color: #243c31; font-size: 13px; font-weight: bold; margin-top: 3px; }
+.detail thead { display: table-header-group; }
+.detail tr { page-break-inside: avoid; }
+.detail th { background: #365849; color: #fff; font-size: 8px; padding: 6px; text-align: left; }
+.detail td { border-bottom: 1px solid #dce4df; padding: 5px 6px; vertical-align: top; }
+.detail tbody tr:nth-child(even) { background: #f7f9f8; }
+.numeric { text-align: right; white-space: nowrap; }
+.empty { color: #68756e; padding: 18px !important; text-align: center; }

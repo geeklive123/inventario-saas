@@ -1,6 +1,7 @@
 <?php
 
 use App\Actions\Catalog\CreateProductRecipe;
+use App\Actions\Catalog\RestoreProductRecipe;
 use App\Enums\InventoryBehavior;
 use App\Enums\ProductItemType;
 use App\Models\Product;
@@ -20,6 +21,10 @@ new #[Title('Recetas')] class extends Component
     public string $yieldQuantity = '1';
     public bool $showHistory = false;
     public bool $showWasteOptions = false;
+
+    public ?int $viewingRecipeId = null;
+
+    public ?int $restoringRecipeId = null;
 
     /** @var array<int, array{component_id: string, quantity: string, waste_percentage: string}> */
     public array $components = [];
@@ -52,7 +57,27 @@ new #[Title('Recetas')] class extends Component
     {
         $product = Product::query()->findOrFail($this->selectedProductId);
         Gate::authorize('manageRecipe', $product);
-        $this->resetDraft();
+        $activeRecipe = ProductRecipe::query()
+            ->with('items')
+            ->where('product_id', $product->getKey())
+            ->where('active_slot', 1)
+            ->first();
+
+        if ($activeRecipe instanceof ProductRecipe) {
+            $this->yieldQuantity = $activeRecipe->yield_quantity;
+            $this->components = $activeRecipe->items->map(fn ($item): array => [
+                'component_id' => (string) $item->component_product_id,
+                'quantity' => $item->quantity,
+                'waste_percentage' => $item->waste_percentage,
+            ])->all();
+            $this->showWasteOptions = $activeRecipe->items->contains(
+                fn ($item): bool => bccomp($item->waste_percentage, '0', 6) === 1,
+            );
+            $this->resetValidation();
+        } else {
+            $this->resetDraft();
+        }
+
         Flux::modal('recipe-draft')->show();
     }
 
@@ -99,7 +124,7 @@ new #[Title('Recetas')] class extends Component
             app(CreateProductRecipe::class)->handle(
                 app(CurrentCompany::class)->membership(),
                 $product,
-                '1',
+                $this->yieldQuantity,
                 $items,
             );
         } catch (\DomainException $exception) {
@@ -113,6 +138,49 @@ new #[Title('Recetas')] class extends Component
         unset($this->recipes);
         $this->showHistory = false;
         $this->resetDraft();
+    }
+
+    public function viewRecipe(int $recipeId): void
+    {
+        $recipe = ProductRecipe::query()->whereKey($recipeId)->where('product_id', $this->selectedProductId)->firstOrFail();
+        Gate::authorize('view', $recipe->product);
+        $this->viewingRecipeId = $recipe->getKey();
+        Flux::modal('recipe-detail')->show();
+    }
+
+    public function confirmRestore(int $recipeId): void
+    {
+        $recipe = ProductRecipe::query()->whereKey($recipeId)->where('product_id', $this->selectedProductId)->firstOrFail();
+        Gate::authorize('manageRecipe', $recipe->product);
+
+        if ($recipe->isActive()) {
+            abort(404);
+        }
+
+        $this->restoringRecipeId = $recipe->getKey();
+        Flux::modal('restore-recipe')->show();
+    }
+
+    public function restoreRecipe(): void
+    {
+        $recipe = ProductRecipe::query()->findOrFail($this->restoringRecipeId);
+        Gate::authorize('manageRecipe', $recipe->product);
+
+        try {
+            $restored = app(RestoreProductRecipe::class)->handle(
+                app(CurrentCompany::class)->membership(),
+                $recipe,
+            );
+        } catch (\DomainException $exception) {
+            $this->addError('restoreRecipe', $exception->getMessage());
+
+            return;
+        }
+
+        $this->restoringRecipeId = null;
+        unset($this->recipes);
+        Flux::modal('restore-recipe')->close();
+        Flux::toast(variant: 'success', text: "La receta fue restaurada como versión {$restored->version}.");
     }
 
     public function formatQuantity(int|float|string $quantity): string
@@ -153,10 +221,22 @@ new #[Title('Recetas')] class extends Component
     public function recipes(): Collection
     {
         return ProductRecipe::query()
-            ->with(['items.componentProduct.unit', 'createdBy.user'])
+            ->with(['product:id,company_id', 'items.componentProduct.unit', 'createdBy.user'])
             ->where('product_id', $this->selectedProductId)
             ->latest('version')
             ->get();
+    }
+
+    #[Computed]
+    public function viewingRecipe(): ?ProductRecipe
+    {
+        return $this->recipes->firstWhere('id', $this->viewingRecipeId);
+    }
+
+    #[Computed]
+    public function restoringRecipe(): ?ProductRecipe
+    {
+        return $this->recipes->firstWhere('id', $this->restoringRecipeId);
     }
 
     private function resetDraft(): void
@@ -213,7 +293,7 @@ new #[Title('Recetas')] class extends Component
         <flux:card>
             <div class="flex flex-col justify-between gap-4 md:flex-row md:items-start">
                 <div>
-                    <flux:heading size="lg">Receta actual</flux:heading>
+                    <flux:heading size="lg">Receta actual · Versión {{ $currentRecipe->version }}</flux:heading>
                     <flux:text class="mt-1">
                         Esta receta prepara 1 {{ $this->selectedProduct?->name }}.
                     </flux:text>
@@ -282,6 +362,12 @@ new #[Title('Recetas')] class extends Component
                                 </div>
                             @endforeach
                         </div>
+                        <div class="mt-4 flex flex-wrap justify-end gap-2">
+                            <flux:button size="sm" variant="subtle" icon="eye" wire:click="viewRecipe({{ $recipe->id }})">Ver detalle</flux:button>
+                            @can('manageRecipe', $recipe->product)
+                                <flux:button size="sm" variant="primary" icon="arrow-path" wire:click="confirmRestore({{ $recipe->id }})">Restaurar como nueva versión</flux:button>
+                            @endcan
+                        </div>
                     </flux:card>
                 @endforeach
             </div>
@@ -336,6 +422,28 @@ new #[Title('Recetas')] class extends Component
                 <flux:modal.close><flux:button variant="ghost">Cancelar</flux:button></flux:modal.close>
                 <flux:button type="submit" variant="primary" wire:confirm="¿Confirmas esta receta? La receta actual se conservará en el historial." wire:loading.attr="disabled">Guardar receta</flux:button>
             </div>
+        </form>
+    </flux:modal>
+
+    <flux:modal name="recipe-detail" class="max-w-2xl">
+        @if ($this->viewingRecipe)
+            <div class="space-y-5">
+                <div><flux:heading size="lg">Versión {{ $this->viewingRecipe->version }}</flux:heading><flux:text>Composición histórica conservada sin modificaciones.</flux:text></div>
+                <div class="divide-y divide-zinc-200 dark:divide-zinc-700">
+                    @foreach($this->viewingRecipe->items as $item)
+                        <div class="flex justify-between gap-4 py-3"><span>{{ $item->componentProduct->name }}</span><strong>{{ $this->formatQuantity($item->quantity) }} {{ $item->componentProduct->unit->symbol }}@if((float) $item->waste_percentage > 0) · {{ $this->formatQuantity($item->waste_percentage) }} % desperdicio @endif</strong></div>
+                    @endforeach
+                </div>
+                <div class="flex justify-end"><flux:modal.close><flux:button>Volver</flux:button></flux:modal.close></div>
+            </div>
+        @endif
+    </flux:modal>
+
+    <flux:modal name="restore-recipe" class="max-w-lg">
+        <form wire:submit="restoreRecipe" class="space-y-5">
+            <div><flux:heading size="lg">Restaurar versión {{ $this->restoringRecipe?->version }}</flux:heading><flux:text>Se creará una nueva versión utilizando la composición de esta receta anterior. La receta actual permanecerá en el historial.</flux:text></div>
+            @error('restoreRecipe')<flux:callout variant="danger" icon="x-circle" :heading="$message" />@enderror
+            <div class="flex justify-end gap-3"><flux:modal.close><flux:button variant="ghost">Cancelar</flux:button></flux:modal.close><flux:button type="submit" variant="primary">Restaurar como nueva versión</flux:button></div>
         </form>
     </flux:modal>
 </div>

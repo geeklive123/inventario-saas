@@ -116,6 +116,7 @@ function confirmTestSale(array $context, array $lines, array $payments, ?string 
         $lines,
         $payments,
         $customer,
+        deliveryAt: now()->addDay(),
     );
 }
 
@@ -179,7 +180,7 @@ test('insufficient stock rejects the whole sale without partial records', functi
         ->and(StockBalance::query()->where('product_id', $paper->getKey())->value('quantity'))->toBe('10.000000');
 });
 
-test('split payments must equal the sale total', function () {
+test('split payments may cover all or part of the sale total', function () {
     $context = salesContext();
     $rose = salesSupply($context, 'Rosa', 'ROSA-PAY', '20', '5');
     $bouquet = salesBouquet($context, [['product' => $rose, 'quantity' => 1]], '80');
@@ -193,9 +194,12 @@ test('split payments must equal the sale total', function () {
     expect($sale->payments)->toHaveCount(2)
         ->and($sale->payments->sum('amount_base'))->toEqual(80.0);
 
-    expect(fn () => confirmTestSale($context, [['product' => $bouquet, 'quantity' => 1]], [
+    $partial = confirmTestSale($context, [['product' => $bouquet, 'quantity' => 1]], [
         ['payment_method' => $methods->get('cash'), 'amount_base' => 79],
-    ]))->toThrow(DomainException::class, 'pagos debe ser igual');
+    ]);
+
+    expect($partial->paid_total_base)->toBe('79.0000')
+        ->and($partial->balance_due_base)->toBe('1.0000');
 });
 
 test('one sale supports multiple bouquets and aggregates shared component consumption', function () {
@@ -238,10 +242,7 @@ test('voiding a sale creates a reversal and restores stock without deleting hist
     $context = salesContext();
     $rose = salesSupply($context, 'Rosa', 'ROSA-VOID', '20', '5');
     $bouquet = salesBouquet($context, [['product' => $rose, 'quantity' => 2]], '20');
-    $cash = PaymentMethod::query()->withoutGlobalScope('company')->where('company_id', $context['company']->getKey())->where('code', 'cash')->firstOrFail();
-    $sale = confirmTestSale($context, [['product' => $bouquet, 'quantity' => 2]], [
-        ['payment_method' => $cash, 'amount_base' => 40],
-    ]);
+    $sale = confirmTestSale($context, [['product' => $bouquet, 'quantity' => 2]], []);
     $original = $sale->stockMovementLinks->firstOrFail()->stockMovement;
     $originalAttributes = $original->getAttributes();
 

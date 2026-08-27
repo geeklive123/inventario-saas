@@ -5,7 +5,9 @@ namespace App\Actions\Sales;
 use App\Enums\InventoryBehavior;
 use App\Enums\MembershipStatus;
 use App\Enums\ModuleCode;
+use App\Enums\PaymentStatus;
 use App\Enums\ProductItemType;
+use App\Enums\SaleOrderStatus;
 use App\Enums\SaleStatus;
 use App\Enums\SaleStockMovementKind;
 use App\Enums\StockMovementType;
@@ -16,6 +18,8 @@ use App\Models\PaymentMethod;
 use App\Models\Product;
 use App\Models\ProductRecipe;
 use App\Models\Sale;
+use App\Models\SaleExtra;
+use App\Models\SaleExtraLine;
 use App\Models\SaleItem;
 use App\Models\SaleItemComponent;
 use App\Models\SalePayment;
@@ -38,8 +42,9 @@ class ConfirmSale
     ) {}
 
     /**
-     * @param  array<int, array{product: Product, quantity: int|float|string}>  $lines
+     * @param  array<int, array{product: Product, quantity: int|float|string, customizations?: array<int, array{product: Product, quantity: int|float|string}>}>  $lines
      * @param  array<int, array{payment_method: PaymentMethod, amount_base: int|float|string}>  $payments
+     * @param  array<int, array{extra: SaleExtra, quantity: int|float|string, unit_price_base?: int|float|string}>  $extras
      */
     public function handle(
         Membership $actor,
@@ -49,16 +54,32 @@ class ConfirmSale
         array $payments,
         ?string $customerName = null,
         ?CarbonInterface $occurredAt = null,
+        array $extras = [],
+        SaleOrderStatus $orderStatus = SaleOrderStatus::Reserved,
+        ?CarbonInterface $deliveryAt = null,
     ): Sale {
         $this->authorize($actor);
         $this->validateLocation($actor, $branch, $warehouse);
 
-        if ($lines === [] || $payments === []) {
-            throw new DomainException('La venta requiere al menos un ramo y un pago.');
+        if ($lines === []) {
+            throw new DomainException('La venta requiere al menos un ramo.');
+        }
+
+        if ($payments !== []
+            && ! $this->access->allows($actor->user, $actor->company, 'sales.payments.create')) {
+            throw new DomainException('La membership responsable no puede registrar cobros.');
+        }
+
+        if ($orderStatus === SaleOrderStatus::Cancelled) {
+            throw new DomainException('Una venta nueva no puede crearse anulada.');
+        }
+
+        if ($orderStatus === SaleOrderStatus::Reserved && $deliveryAt === null) {
+            throw new DomainException('La fecha y hora de entrega es obligatoria para una reserva.');
         }
 
         return DB::transaction(function () use (
-            $actor, $branch, $warehouse, $lines, $payments, $customerName, $occurredAt,
+            $actor, $branch, $warehouse, $lines, $payments, $customerName, $occurredAt, $extras, $orderStatus, $deliveryAt,
         ): Sale {
             $company = Company::query()->whereKey($actor->company_id)->lockForUpdate()->firstOrFail();
             $lockedActor = Membership::query()
@@ -74,8 +95,16 @@ class ConfirmSale
 
             $this->authorize($lockedActor);
             $preparedItems = $this->prepareItems($company, $warehouse, $lines);
-            $total = $this->sumMoney($preparedItems->pluck('subtotal_base'));
+            $subtotal = $this->sumMoney($preparedItems->pluck('subtotal_base'));
+            $preparedExtras = $this->prepareExtras($lockedActor, $company, $extras);
+            $extrasTotal = $this->sumMoney(collect($preparedExtras)->pluck('subtotal_base'));
+            $total = $this->money(bcadd($subtotal, $extrasTotal, 8));
             $preparedPayments = $this->preparePayments($company, $payments, $total);
+            $paidTotal = $this->sumMoney(collect($preparedPayments)->pluck('amount_base'));
+            $balance = $this->money(bcsub($total, $paidTotal, 8));
+            $paymentStatus = bccomp($paidTotal, '0', 4) === 0
+                ? PaymentStatus::Pending
+                : (bccomp($balance, '0', 4) === 0 ? PaymentStatus::Paid : PaymentStatus::Partial);
             $totalCost = $this->sumMoney($preparedItems->pluck('total_cost_base'));
             $sequence = (int) Sale::query()
                 ->withoutGlobalScope('company')
@@ -94,12 +123,19 @@ class ConfirmSale
                 'branch_name' => $branch->name,
                 'warehouse_name' => $warehouse->name,
                 'status' => SaleStatus::Confirmed,
-                'subtotal_base' => $total,
+                'order_status' => $orderStatus,
+                'payment_status' => $paymentStatus,
+                'subtotal_base' => $subtotal,
+                'extras_total_base' => $extrasTotal,
                 'total_base' => $total,
+                'paid_total_base' => $paidTotal,
+                'balance_due_base' => $balance,
                 'total_cost_base' => $totalCost,
                 'gross_margin_base' => $this->money(bcsub($total, $totalCost, 8)),
                 'confirmed_by_membership_id' => $lockedActor->getKey(),
                 'occurred_at' => $occurredAt ?? now(),
+                'delivery_at' => $deliveryAt,
+                'delivery_updated_by_membership_id' => $deliveryAt === null ? null : $lockedActor->getKey(),
             ]);
 
             foreach ($preparedItems as $preparedItem) {
@@ -118,10 +154,20 @@ class ConfirmSale
                 }
             }
 
+            foreach ($preparedExtras as $extra) {
+                SaleExtraLine::query()->create([
+                    'company_id' => $company->getKey(),
+                    'sale_id' => $sale->getKey(),
+                    ...$extra,
+                ]);
+            }
+
             foreach ($preparedPayments as $payment) {
                 SalePayment::query()->create([
                     'company_id' => $company->getKey(),
                     'sale_id' => $sale->getKey(),
+                    'received_by_membership_id' => $lockedActor->getKey(),
+                    'occurred_at' => $occurredAt ?? now(),
                     ...$payment,
                 ]);
             }
@@ -145,7 +191,8 @@ class ConfirmSale
 
             return $sale->load([
                 'branch', 'warehouse', 'confirmedBy.user', 'items.components',
-                'payments.paymentMethod', 'stockMovementLinks.stockMovement.lines.product',
+                'extraLines.extra', 'payments.paymentMethod', 'payments.receivedBy.user',
+                'stockMovementLinks.stockMovement.lines.product',
             ]);
         }, attempts: 3);
     }
@@ -170,13 +217,14 @@ class ConfirmSale
     }
 
     /**
-     * @param  array<int, array{product: Product, quantity: int|float|string}>  $lines
+     * @param  array<int, array{product: Product, quantity: int|float|string, customizations?: array<int, array{product: Product, quantity: int|float|string}>}>  $lines
      * @return Collection<int, Collection<string, mixed>>
      */
     private function prepareItems(Company $company, Warehouse $warehouse, array $lines): Collection
     {
         $requested = collect($lines);
         $productIds = $requested->map(fn (array $line): int => (int) $line['product']->getKey());
+        $requestedByProduct = $requested->keyBy(fn (array $line): int => (int) $line['product']->getKey());
 
         if ($productIds->duplicates()->isNotEmpty()) {
             throw new DomainException('Cada ramo debe aparecer una sola vez en la venta.');
@@ -215,9 +263,27 @@ class ConfirmSale
             ->lockForUpdate()
             ->get()
             ->keyBy('product_id');
+        $customProductIds = $requested->flatMap(
+            fn (array $line): array => collect($line['customizations'] ?? [])
+                ->map(fn (array $customization): int => (int) $customization['product']->getKey())
+                ->all(),
+        );
         $componentIds = $recipes->flatMap(
             fn (ProductRecipe $recipe) => $recipe->items->pluck('component_product_id'),
-        )->unique()->sort()->values();
+        )->merge($customProductIds)->unique()->sort()->values();
+        $componentProducts = Product::query()
+            ->withoutGlobalScope('company')
+            ->with('unit:id,symbol')
+            ->where('company_id', $company->getKey())
+            ->whereIn('id', $componentIds)
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get()
+            ->keyBy('id');
+
+        if ($componentProducts->count() !== $componentIds->count()) {
+            throw new DomainException('Todos los insumos personalizados deben pertenecer a la empresa.');
+        }
         $balances = StockBalance::query()
             ->withoutGlobalScope('company')
             ->where('company_id', $company->getKey())
@@ -269,17 +335,79 @@ class ConfirmSale
                         ? bcadd($requirements[$componentId]['quantity'], $consumed, 6)
                         : $consumed,
                 ];
-                $components->push([
+                $components->put($componentId, [
                     'product_id' => $componentId,
                     'product_name' => $component->name,
                     'product_sku' => $component->sku,
                     'unit_symbol' => $component->unit->symbol,
                     'recipe_quantity' => $recipeItem->quantity,
+                    'customization_quantity' => '0.000000',
                     'waste_percentage' => $recipeItem->waste_percentage,
                     'quantity_consumed' => $consumed,
+                    'customization_quantity_consumed' => '0.000000',
                     'unit_cost_base' => $this->money($unitCost),
                     'total_cost_base' => $componentCost,
+                    'customization_total_cost_base' => '0.0000',
                 ]);
+            }
+
+            $customizations = collect($requestedByProduct->get($productId)['customizations'] ?? []);
+            $customizationIds = $customizations->map(fn (array $customization): int => (int) $customization['product']->getKey());
+
+            if ($customizationIds->duplicates()->isNotEmpty()) {
+                throw new DomainException('No repitas un mismo insumo en la personalización del ramo.');
+            }
+
+            foreach ($customizations as $customization) {
+                $componentId = (int) $customization['product']->getKey();
+                $component = $componentProducts->get($componentId);
+                $customQuantity = Decimal::normalize($customization['quantity'], 6);
+
+                if (! $component instanceof Product
+                    || ! $component->is_active
+                    || $component->item_type !== ProductItemType::Physical
+                    || $component->inventory_behavior !== InventoryBehavior::Self
+                    || $component->is_sellable
+                    || bccomp($customQuantity, '0', 6) <= 0) {
+                    throw new DomainException('La personalización requiere insumos activos con una cantidad mayor que cero.');
+                }
+
+                $customConsumed = $this->quantity(bcmul($customQuantity, $quantity, 12));
+                $balance = $balances->get($componentId);
+                $unitCost = $this->inventory->currentUnitCost($component, $balance);
+
+                if ($unitCost === null) {
+                    throw new DomainException("No existe un costo conocido para {$component->name}.");
+                }
+
+                $customCost = $this->money(bcmul($customConsumed, $unitCost, 8));
+                $itemCost = $this->money(bcadd($itemCost, $customCost, 8));
+                $requirements[$componentId] = [
+                    'product' => $component,
+                    'quantity' => isset($requirements[$componentId])
+                        ? bcadd($requirements[$componentId]['quantity'], $customConsumed, 6)
+                        : $customConsumed,
+                ];
+                $snapshot = $components->get($componentId, [
+                    'product_id' => $componentId,
+                    'product_name' => $component->name,
+                    'product_sku' => $component->sku,
+                    'unit_symbol' => $component->unit->symbol,
+                    'recipe_quantity' => '0.000000',
+                    'customization_quantity' => '0.000000',
+                    'waste_percentage' => '0.000000',
+                    'quantity_consumed' => '0.000000',
+                    'customization_quantity_consumed' => '0.000000',
+                    'unit_cost_base' => $this->money($unitCost),
+                    'total_cost_base' => '0.0000',
+                    'customization_total_cost_base' => '0.0000',
+                ]);
+                $snapshot['customization_quantity'] = $customQuantity;
+                $snapshot['customization_quantity_consumed'] = $customConsumed;
+                $snapshot['quantity_consumed'] = bcadd($snapshot['quantity_consumed'], $customConsumed, 6);
+                $snapshot['customization_total_cost_base'] = $customCost;
+                $snapshot['total_cost_base'] = $this->money(bcadd($snapshot['total_cost_base'], $customCost, 8));
+                $components->put($componentId, $snapshot);
             }
 
             $prepared->push(collect([
@@ -295,7 +423,7 @@ class ConfirmSale
                 'unit_cost_base' => $this->money(bcdiv($itemCost, $quantity, 8)),
                 'total_cost_base' => $itemCost,
                 'gross_margin_base' => $this->money(bcsub($subtotal, $itemCost, 8)),
-                'components' => $components,
+                'components' => $components->values(),
             ]));
         }
 
@@ -318,6 +446,67 @@ class ConfirmSale
         }
 
         return $prepared;
+    }
+
+    /**
+     * @param  array<int, array{extra: SaleExtra, quantity: int|float|string, unit_price_base?: int|float|string}>  $extras
+     * @return array<int, array{sale_extra_id: int, extra_name: string, extra_type: mixed, quantity: string, unit_price_base: string, subtotal_base: string}>
+     */
+    private function prepareExtras(Membership $actor, Company $company, array $extras): array
+    {
+        if ($extras === []) {
+            return [];
+        }
+
+        $requested = collect($extras);
+        $extraIds = $requested->map(fn (array $line): int => (int) $line['extra']->getKey());
+
+        if ($extraIds->duplicates()->isNotEmpty()) {
+            throw new DomainException('Cada extra debe aparecer una sola vez en la venta.');
+        }
+
+        $availableExtras = SaleExtra::query()
+            ->withoutGlobalScope('company')
+            ->where('company_id', $company->getKey())
+            ->where('is_active', true)
+            ->whereIn('id', $extraIds)
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get()
+            ->keyBy('id');
+
+        if ($availableExtras->count() !== $extraIds->count()) {
+            throw new DomainException('Todos los extras deben estar activos y pertenecer a la empresa.');
+        }
+
+        return $requested->map(function (array $line) use ($actor, $availableExtras): array {
+            $extra = $availableExtras->get($line['extra']->getKey());
+
+            if (! $extra instanceof SaleExtra) {
+                throw new DomainException('El extra no está disponible.');
+            }
+
+            $quantity = Decimal::normalize($line['quantity'], 6);
+            $unitPrice = Decimal::normalize($line['unit_price_base'] ?? $extra->default_price_base, 4);
+
+            if (bccomp($quantity, '0', 6) <= 0 || bccomp($unitPrice, '0', 4) < 0) {
+                throw new DomainException('La cantidad y el precio del extra deben ser válidos.');
+            }
+
+            if (bccomp($unitPrice, $extra->default_price_base, 4) !== 0
+                && ! $this->access->allows($actor->user, $actor->company, 'sales.extras.price.update')) {
+                throw new DomainException('La membership responsable no puede cambiar el precio de un extra.');
+            }
+
+            return [
+                'sale_extra_id' => (int) $extra->getKey(),
+                'extra_name' => $extra->name,
+                'extra_type' => $extra->type,
+                'quantity' => $quantity,
+                'unit_price_base' => $unitPrice,
+                'subtotal_base' => $this->money(bcmul($quantity, $unitPrice, 8)),
+            ];
+        })->all();
     }
 
     /**
@@ -360,8 +549,8 @@ class ConfirmSale
             $prepared[] = $this->paymentSnapshot($method, $payment['amount_base']);
         }
 
-        if (bccomp($this->sumMoney(collect($prepared)->pluck('amount_base')), $total, 4) !== 0) {
-            throw new DomainException('La suma de los pagos debe ser igual al total de la venta.');
+        if (bccomp($this->sumMoney(collect($prepared)->pluck('amount_base')), $total, 4) === 1) {
+            throw new DomainException('La suma de los pagos no puede superar el total de la venta.');
         }
 
         return $prepared;

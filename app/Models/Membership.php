@@ -92,6 +92,12 @@ class Membership extends Model
         return $this->hasMany(Sale::class, 'voided_by_membership_id');
     }
 
+    /** @return HasMany<SalePayment, $this> */
+    public function receivedSalePayments(): HasMany
+    {
+        return $this->hasMany(SalePayment::class, 'received_by_membership_id');
+    }
+
     /** @return HasMany<Expense, $this> */
     public function expenses(): HasMany
     {

@@ -2,7 +2,9 @@
 
 namespace App\Models;
 
+use App\Enums\ExpenseReceiptType;
 use App\Enums\ExpenseStatus;
+use App\Enums\ExpenseType;
 use App\Models\Concerns\BelongsToCompany;
 use Database\Factories\ExpenseFactory;
 use DomainException;
@@ -16,9 +18,9 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property numeric-string $amount_base
  */
 #[Fillable([
-    'company_id', 'sequence_number', 'number', 'branch_id', 'membership_id',
+    'company_id', 'sequence_number', 'number', 'type', 'branch_id', 'sale_id', 'membership_id',
     'expense_category_id', 'payment_method_id', 'category_name', 'payment_method_name',
-    'branch_name', 'reference', 'concept', 'amount_base', 'occurred_at', 'notes', 'status',
+    'branch_name', 'reference', 'receipt_type', 'invoice_number', 'concept', 'amount_base', 'occurred_at', 'notes', 'status',
     'cancelled_by_membership_id', 'cancelled_at', 'cancellation_reason',
 ])]
 class Expense extends Model
@@ -27,6 +29,11 @@ class Expense extends Model
 
     /** @use HasFactory<ExpenseFactory> */
     use HasFactory;
+
+    protected $attributes = [
+        'type' => ExpenseType::Indirect->value,
+        'receipt_type' => ExpenseReceiptType::WithoutInvoice->value,
+    ];
 
     protected static function booted(): void
     {
@@ -63,6 +70,12 @@ class Expense extends Model
         return $this->belongsTo(Membership::class, 'membership_id');
     }
 
+    /** @return BelongsTo<Sale, $this> */
+    public function sale(): BelongsTo
+    {
+        return $this->belongsTo(Sale::class);
+    }
+
     /** @return BelongsTo<ExpenseCategory, $this> */
     public function category(): BelongsTo
     {
@@ -87,6 +100,8 @@ class Expense extends Model
         return [
             'sequence_number' => 'integer',
             'amount_base' => 'decimal:4',
+            'type' => ExpenseType::class,
+            'receipt_type' => ExpenseReceiptType::class,
             'occurred_at' => 'datetime',
             'status' => ExpenseStatus::class,
             'cancelled_at' => 'datetime',

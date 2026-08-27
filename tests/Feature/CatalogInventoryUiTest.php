@@ -127,7 +127,7 @@ test('a disabled inventory module keeps history readable and hides mutation cont
         ->get(route('inventory.stock'))
         ->assertSuccessful()
         ->assertSee('Modo histórico')
-        ->assertDontSee('Cargar existencia inicial');
+        ->assertDontSee('Cargar stock inicial');
 });
 
 test('company switcher rejects a membership owned by another user', function () {

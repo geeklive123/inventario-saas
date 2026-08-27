@@ -12,8 +12,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 #[Fillable([
     'company_id', 'sale_item_id', 'product_id', 'product_name', 'product_sku',
-    'unit_symbol', 'recipe_quantity', 'waste_percentage', 'quantity_consumed',
-    'unit_cost_base', 'total_cost_base',
+    'unit_symbol', 'recipe_quantity', 'customization_quantity', 'waste_percentage', 'quantity_consumed',
+    'customization_quantity_consumed', 'unit_cost_base', 'total_cost_base', 'customization_total_cost_base',
 ])]
 class SaleItemComponent extends Model
 {
@@ -40,9 +40,10 @@ class SaleItemComponent extends Model
     protected function casts(): array
     {
         return [
-            'recipe_quantity' => 'decimal:6', 'waste_percentage' => 'decimal:6',
-            'quantity_consumed' => 'decimal:6', 'unit_cost_base' => 'decimal:4',
-            'total_cost_base' => 'decimal:4',
+            'recipe_quantity' => 'decimal:6', 'customization_quantity' => 'decimal:6',
+            'waste_percentage' => 'decimal:6', 'quantity_consumed' => 'decimal:6',
+            'customization_quantity_consumed' => 'decimal:6', 'unit_cost_base' => 'decimal:4',
+            'total_cost_base' => 'decimal:4', 'customization_total_cost_base' => 'decimal:4',
         ];
     }
 }

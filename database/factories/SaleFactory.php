@@ -2,6 +2,8 @@
 
 namespace Database\Factories;
 
+use App\Enums\PaymentStatus;
+use App\Enums\SaleOrderStatus;
 use App\Enums\SaleStatus;
 use App\Models\Branch;
 use App\Models\Company;
@@ -36,13 +38,20 @@ class SaleFactory extends Factory
             'branch_name' => fake()->words(2, true),
             'warehouse_name' => fake()->words(2, true),
             'status' => SaleStatus::Confirmed,
+            'order_status' => SaleOrderStatus::Reserved,
+            'payment_status' => PaymentStatus::Pending,
             'subtotal_base' => 100,
+            'extras_total_base' => 0,
             'total_base' => 100,
+            'paid_total_base' => 0,
+            'balance_due_base' => 100,
             'total_cost_base' => 60,
             'gross_margin_base' => 40,
             'confirmed_by_membership_id' => fn (array $attributes) => Membership::factory()->create(['company_id' => $attributes['company_id']])->getKey(),
             'voided_by_membership_id' => null,
             'occurred_at' => now(),
+            'delivery_at' => now()->addDay(),
+            'delivery_updated_by_membership_id' => null,
             'voided_at' => null,
             'void_reason' => null,
         ];

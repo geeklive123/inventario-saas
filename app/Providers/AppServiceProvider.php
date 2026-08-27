@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use App\Http\Middleware\EnsureAnyPermission;
 use App\Http\Middleware\EnsureModuleEnabled;
 use App\Http\Middleware\EnsurePasswordChanged;
 use App\Http\Middleware\EnsurePermission;
@@ -34,6 +35,7 @@ class AppServiceProvider extends ServiceProvider
             EnsurePasswordChanged::class,
             EnsureModuleEnabled::class,
             EnsurePermission::class,
+            EnsureAnyPermission::class,
         ]);
 
         $this->configureDefaults();

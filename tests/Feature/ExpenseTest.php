@@ -8,7 +8,9 @@ use App\Enums\ExpenseStatus;
 use App\Models\Expense;
 use App\Models\ExpenseCategory;
 use App\Models\PaymentMethod;
+use App\Support\Tenancy\CurrentCompany;
 use Database\Seeders\DatabaseSeeder;
+use Livewire\Livewire;
 
 beforeEach(fn () => $this->seed(DatabaseSeeder::class));
 
@@ -54,4 +56,18 @@ test('expense references cannot cross company boundaries', function () {
         ->toThrow(DomainException::class, 'pertenecer a la empresa');
 
     expect(Expense::query()->withoutGlobalScope('company')->count())->toBe(0);
+});
+
+test('expense form does not expose the legacy direct or indirect classification', function () {
+    $context = expenseContext('Gastos sencillos');
+    app(CurrentCompany::class)->set($context['membership']);
+
+    Livewire::actingAs($context['owner'])->test('pages::finance.expenses')
+        ->assertSee('Categoría')
+        ->assertSee('Método de pago')
+        ->assertSee('Tipo de comprobante')
+        ->assertDontSee('Tipo de gasto')
+        ->assertDontSee('Directo')
+        ->assertDontSee('Indirecto')
+        ->assertDontSee('Venta relacionada');
 });

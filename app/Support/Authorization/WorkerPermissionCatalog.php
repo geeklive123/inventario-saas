@@ -24,6 +24,10 @@ class WorkerPermissionCatalog
                 'view_sales' => $this->capability('Ver ventas', ['sales.view']),
                 'register_sales' => $this->capability('Registrar ventas', ['sales.view', 'sales.create']),
                 'void_sales' => $this->capability('Anular ventas', ['sales.view', 'sales.void']),
+                'view_sale_balances' => $this->capability('Ver saldos pendientes', ['sales.view', 'sales.balances.view']),
+                'register_sale_payments' => $this->capability('Registrar pagos', ['sales.view', 'sales.balances.view', 'sales.payments.create']),
+                'manage_sale_extras' => $this->capability('Gestionar extras', ['sales.view', 'sales.extras.manage']),
+                'change_sale_extra_prices' => $this->capability('Modificar precio de extras', ['sales.view', 'sales.extras.price.update']),
                 'view_sales_income' => $this->capability('Ver ingresos de ventas', ['finance.sales_income.view']),
             ]],
             'catalog' => ['label' => 'RAMOS E INSUMOS', 'capabilities' => [
@@ -37,9 +41,9 @@ class WorkerPermissionCatalog
             ]],
             'inventory' => ['label' => 'INVENTARIO', 'capabilities' => [
                 'view_inventory' => $this->capability('Ver existencias', ['inventory.view']),
-                'register_inbound' => $this->capability('Registrar compras / entradas', ['inventory.view', 'inventory.adjust']),
+                'register_inbound' => $this->capability('Registrar compras', ['inventory.view', 'inventory.adjust']),
                 'register_outbound' => $this->capability('Registrar salidas', ['inventory.view', 'inventory.adjust']),
-                'correct_inventory' => $this->capability('Corregir existencias', ['inventory.view', 'inventory.adjust']),
+                'correct_inventory' => $this->capability('Ajustar stock', ['inventory.view', 'inventory.adjust']),
                 'register_waste' => $this->capability('Registrar mermas', ['inventory.view', 'inventory.waste']),
                 'reverse_inventory' => $this->capability('Revertir movimientos', ['inventory.view', 'inventory.reverse']),
             ]],
@@ -51,6 +55,12 @@ class WorkerPermissionCatalog
                 'cancel_expenses' => $this->capability('Anular gastos', ['finance.expenses.view', 'finance.expenses.cancel']),
                 'view_costs' => $this->capability('Ver costos', ['sales.costs.view']),
                 'view_profits' => $this->capability('Ver ganancias / resultado estimado', ['sales.profits.view']),
+            ]],
+            'reports' => ['label' => 'REPORTES', 'capabilities' => [
+                'view_sales_reports' => $this->capability('Ver reportes de ventas', ['reports.sales.view']),
+                'view_inventory_reports' => $this->capability('Ver reportes de inventario', ['reports.inventory.view']),
+                'view_expense_reports' => $this->capability('Ver reportes de gastos', ['reports.expenses.view']),
+                'view_financial_reports' => $this->capability('Ver reportes financieros', ['reports.financial.view']),
             ]],
             'users' => ['label' => 'USUARIOS', 'capabilities' => [
                 'view_workers' => $this->capability('Ver trabajadores', ['core.users.view']),

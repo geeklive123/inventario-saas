@@ -11,6 +11,13 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
+/**
+ * @property string $product_name
+ * @property numeric-string $quantity
+ * @property numeric-string $subtotal_base
+ * @property numeric-string $total_cost_base
+ * @property numeric-string $gross_margin_base
+ */
 #[Fillable([
     'company_id', 'sale_id', 'product_id', 'product_recipe_id', 'recipe_version',
     'product_name', 'product_sku', 'unit_symbol', 'quantity', 'unit_price_base',

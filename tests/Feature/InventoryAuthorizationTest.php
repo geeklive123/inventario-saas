@@ -75,7 +75,7 @@ test('an owner with inventory enabled can register inventory operations', functi
         ->withSession(['current_membership_id' => $context['membership']->getKey()])
         ->get(route('inventory.stock'))
         ->assertSuccessful()
-        ->assertSee('Cargar existencia inicial')
+        ->assertSee('Cargar stock inicial')
         ->assertDontSee('Modo histórico');
 
     expect($movement->company_id)->toBe($context['company']->getKey())
@@ -90,7 +90,7 @@ test('an owner with inventory disabled can only read inventory history', functio
         ->get(route('inventory.stock'))
         ->assertSuccessful()
         ->assertSee('Modo histórico')
-        ->assertDontSee('Cargar existencia inicial');
+        ->assertDontSee('Cargar stock inicial');
 
     expect(fn () => app(RegisterOpeningStock::class)->handle(
         $context['membership'],

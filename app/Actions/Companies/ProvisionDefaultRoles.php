@@ -46,9 +46,12 @@ class ProvisionDefaultRoles
                 'inventory.waste',
                 'sales.view',
                 'sales.create',
+                'sales.balances.view',
+                'sales.payments.create',
             ])->where('is_active', true)->pluck('id');
             $sellerPermissionIds = Permission::query()->whereIn('code', [
                 'catalog.view', 'inventory.view', 'sales.view', 'sales.create',
+                'sales.balances.view', 'sales.payments.create',
             ])->where('is_active', true)->pluck('id');
             $inventoryPermissionIds = Permission::query()->whereIn('code', [
                 'catalog.view', 'inventory.view', 'inventory.adjust', 'inventory.waste',

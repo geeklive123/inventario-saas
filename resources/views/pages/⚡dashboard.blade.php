@@ -140,12 +140,14 @@ new #[Title('Dashboard')] class extends Component
     <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <flux:card><flux:text>Ventas realizadas</flux:text><flux:heading size="xl" class="mt-2">{{ $this->business['sales_count'] }}</flux:heading></flux:card>
         <flux:card><flux:text>Ramos vendidos</flux:text><flux:heading size="xl" class="mt-2">{{ Number::format((float) $this->business['bouquets_sold'], precision: 0, locale: 'es') }}</flux:heading></flux:card>
-        @if($this->business['visibility']['canViewIncome'])<flux:card><flux:text>Ingresos por ventas</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['income_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading></flux:card>@endif
+        @if($this->business['visibility']['canViewIncome'])<flux:card><flux:text>Ventas del período</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['sales_booked_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading><flux:text size="sm">Importe vendido, aunque quede saldo pendiente.</flux:text></flux:card><flux:card><flux:text>Cobrado en el período</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['collected_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading><flux:text size="sm">Según la fecha de cada pago recibido.</flux:text></flux:card>@endif
+        @if($this->business['visibility']['canViewBalances'])<flux:card><flux:text>Por cobrar</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['receivable_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading><flux:text size="sm">Saldo pendiente actual.</flux:text></flux:card>@endif
         @if($this->business['visibility']['canViewCosts'])<flux:card><flux:text>Costo de ramos vendidos</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['cost_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading></flux:card>@endif
         @if($this->business['visibility']['canViewProfit'])<flux:card><flux:text>Margen bruto</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['gross_margin_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading></flux:card>@endif
         @if($this->business['visibility']['canViewIncome'])<flux:card><flux:text>Ticket promedio</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['average_ticket_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading></flux:card>@endif
         @if($this->business['visibility']['canViewExpenses'])<flux:card><flux:text>Gastos</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['expenses_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading></flux:card>@endif
         @if($this->business['approximate_result_base'] !== null)<flux:card><flux:text>Resultado aproximado</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['approximate_result_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading></flux:card>@endif
+        @if($this->business['cash_result_base'] !== null)<flux:card><flux:text>Resultado de caja</flux:text><flux:heading size="xl" class="mt-2">{{ $currency->symbol }} {{ Number::format((float) $this->business['cash_result_base'], precision: $currency->decimal_places, locale: 'es') }}</flux:heading><flux:text size="sm">Cobrado menos gastos del período.</flux:text></flux:card>@endif
     </div>
 
     @if(! $this->business['visibility']['canViewIncome'])
@@ -169,10 +171,10 @@ new #[Title('Dashboard')] class extends Component
                     <flux:button class="justify-start" icon="gift" :href="route('bouquets')" wire:navigate>Nuevo ramo</flux:button>
                 @endif
                 @if ($this->capabilities['adjust_stock'])
-                    <flux:button class="justify-start" icon="shopping-cart" :href="route('inventory.stock', ['operacion' => 'inbound'])" wire:navigate>Registrar compra / entrada</flux:button>
+                    <flux:button class="justify-start" icon="shopping-cart" :href="route('inventory.stock', ['operacion' => 'inbound'])" wire:navigate>Registrar compra</flux:button>
                 @endif
                 @if ($this->capabilities['opening_stock'])
-                    <flux:button class="justify-start" icon="archive-box-arrow-down" :href="route('inventory.stock', ['operacion' => 'opening'])" wire:navigate>Cargar existencia inicial</flux:button>
+                    <flux:button class="justify-start" icon="archive-box-arrow-down" :href="route('inventory.stock', ['operacion' => 'opening'])" wire:navigate>Cargar stock inicial</flux:button>
                 @endif
                 @if ($this->capabilities['view_inventory'])
                     <flux:button class="justify-start" icon="archive-box" :href="route('inventory.stock')" wire:navigate>Ver inventario</flux:button>
@@ -263,7 +265,7 @@ new #[Title('Dashboard')] class extends Component
                         <flux:heading>Aún no hay movimientos</flux:heading>
                         <flux:text class="mt-1">Las entradas, salidas y correcciones aparecerán aquí.</flux:text>
                         @if ($this->capabilities['opening_stock'])
-                            <flux:button class="mt-4" :href="route('inventory.stock', ['operacion' => 'opening'])" wire:navigate>Cargar existencia inicial</flux:button>
+                            <flux:button class="mt-4" :href="route('inventory.stock', ['operacion' => 'opening'])" wire:navigate>Cargar stock inicial</flux:button>
                         @endif
                     </div>
                 @endforelse
