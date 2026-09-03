@@ -18,6 +18,7 @@ use App\Models\Module;
 use App\Models\PaymentMethod;
 use App\Models\Product;
 use App\Models\Role;
+use App\Models\Sale;
 use App\Models\StockBalance;
 use App\Models\Unit;
 use App\Models\User;
@@ -107,27 +108,57 @@ test('a non-reserved sale does not require a delivery date', function () {
         ->and($sale->order_status)->toBe(SaleOrderStatus::Preparing);
 });
 
-test('sale customizations multiply once by bouquet quantity and preserve historical cost', function () {
+test('sale customizations multiply price and consumption once and preserve historical snapshots', function () {
     $context = orderEnhancementContext();
     $sale = app(ConfirmSale::class)->handle(
         $context['membership'], $context['branch'], $context['warehouse'],
         [[
             'product' => $context['bouquet'], 'quantity' => 3,
-            'customizations' => [['product' => $context['paper'], 'quantity' => 2]],
+            'customizations' => [[
+                'product' => $context['paper'],
+                'quantity' => 2,
+                'unit_price_base' => '10.50',
+                'note' => 'Papel color rosado',
+            ]],
         ]],
         [],
         deliveryAt: now()->addDay(),
     );
     $components = $sale->items->sole()->components->keyBy('product_id');
+    $stockLines = $sale->stockMovementLinks->sole()->stockMovement->lines->keyBy('product_id');
 
     expect($components[$context['rose']->getKey()]->quantity_consumed)->toBe('6.000000')
         ->and($components[$context['paper']->getKey()]->customization_quantity)->toBe('2.000000')
         ->and($components[$context['paper']->getKey()]->customization_quantity_consumed)->toBe('6.000000')
+        ->and($components[$context['paper']->getKey()]->customization_unit_price_base)->toBe('10.5000')
+        ->and($components[$context['paper']->getKey()]->customization_total_price_base)->toBe('63.0000')
+        ->and($components[$context['paper']->getKey()]->customization_note)->toBe('Papel color rosado')
         ->and($components[$context['paper']->getKey()]->customization_total_cost_base)->toBe('12.0000')
+        ->and($sale->items->sole()->subtotal_base)->toBe('303.0000')
+        ->and($sale->total_base)->toBe('303.0000')
         ->and($sale->total_cost_base)->toBe('42.0000')
+        ->and($sale->gross_margin_base)->toBe('261.0000')
         ->and($context['recipe']->items()->count())->toBe(1)
+        ->and($stockLines)->toHaveCount(2)
+        ->and($stockLines[$context['paper']->getKey()]->quantity)->toBe('-6.000000')
         ->and(StockBalance::query()->where('product_id', $context['rose']->getKey())->value('quantity'))->toBe('94.000000')
         ->and(StockBalance::query()->where('product_id', $context['paper']->getKey())->value('quantity'))->toBe('94.000000');
+
+    $context['paper']->update(['name' => 'Papel renombrado', 'fallback_unit_cost_base' => 20]);
+    $historicalCustomization = $sale->items()->sole()->components()->where('product_id', $context['paper']->getKey())->sole();
+
+    expect($historicalCustomization->product_name)->toBe('Papel')
+        ->and($historicalCustomization->customization_unit_price_base)->toBe('10.5000')
+        ->and($historicalCustomization->customization_note)->toBe('Papel color rosado');
+
+    app(CurrentCompany::class)->set($context['membership']);
+    session()->put('current_membership_id', $context['membership']->getKey());
+    Livewire::actingAs($context['user'])
+        ->test('pages::sales.show', ['saleId' => $sale->getKey()])
+        ->assertSee('Papel')
+        ->assertDontSee('Papel renombrado')
+        ->assertSee('Bs 10,50')
+        ->assertSee('Papel color rosado');
 });
 
 test('increasing an existing recipe component is snapshotted without changing the recipe', function () {
@@ -136,7 +167,7 @@ test('increasing an existing recipe component is snapshotted without changing th
         $context['membership'], $context['branch'], $context['warehouse'],
         [[
             'product' => $context['bouquet'], 'quantity' => 2,
-            'customizations' => [['product' => $context['rose'], 'quantity' => 1]],
+            'customizations' => [['product' => $context['rose'], 'quantity' => 1, 'unit_price_base' => 5]],
         ]],
         [],
         deliveryAt: now()->addDay(),
@@ -147,6 +178,60 @@ test('increasing an existing recipe component is snapshotted without changing th
         ->and($roseSnapshot->customization_quantity)->toBe('1.000000')
         ->and($roseSnapshot->quantity_consumed)->toBe('6.000000')
         ->and($context['recipe']->items()->sole()->quantity)->toBe('2.000000');
+});
+
+test('customization price and note are validated by the sale action', function () {
+    $context = orderEnhancementContext();
+
+    expect(fn () => app(ConfirmSale::class)->handle(
+        $context['membership'], $context['branch'], $context['warehouse'],
+        [[
+            'product' => $context['bouquet'], 'quantity' => 1,
+            'customizations' => [['product' => $context['paper'], 'quantity' => 1, 'unit_price_base' => -1]],
+        ]],
+        [],
+        deliveryAt: now()->addDay(),
+    ))->toThrow(DomainException::class, 'precio no negativo');
+
+    expect(fn () => app(ConfirmSale::class)->handle(
+        $context['membership'], $context['branch'], $context['warehouse'],
+        [[
+            'product' => $context['bouquet'], 'quantity' => 1,
+            'customizations' => [[
+                'product' => $context['paper'], 'quantity' => 1, 'unit_price_base' => 1, 'note' => str_repeat('a', 501),
+            ]],
+        ]],
+        [],
+        deliveryAt: now()->addDay(),
+    ))->toThrow(DomainException::class, 'no puede superar 500 caracteres');
+});
+
+test('sales interface captures and totals customization price and note', function () {
+    $context = orderEnhancementContext();
+    app(CurrentCompany::class)->set($context['membership']);
+    session()->put('current_membership_id', $context['membership']->getKey());
+
+    Livewire::actingAs($context['user'])
+        ->test('pages::sales.index')
+        ->call('openSale')
+        ->set('saleLines.0.product_id', $context['bouquet']->getKey())
+        ->set('saleLines.0.quantity', '2')
+        ->call('addCustomization', 0)
+        ->set('saleLines.0.customizations.0.product_id', $context['paper']->getKey())
+        ->set('saleLines.0.customizations.0.quantity', '1')
+        ->set('saleLines.0.customizations.0.unit_price_base', '10')
+        ->set('saleLines.0.customizations.0.note', 'Papel rojo')
+        ->assertSee('Precio unitario (Bs)')
+        ->assertSee('Importe que se cobrará al cliente por cada unidad adicional.')
+        ->assertSee('Bs 180,00')
+        ->call('confirmSale')
+        ->assertHasNoErrors();
+
+    $sale = Sale::query()->sole();
+
+    expect($sale->total_base)->toBe('180.0000')
+        ->and($sale->items()->sole()->components()->where('product_id', $context['paper']->getKey())->sole()->customization_note)
+        ->toBe('Papel rojo');
 });
 
 test('a foreign customization cannot alter inventory', function () {

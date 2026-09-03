@@ -33,6 +33,7 @@ use Carbon\CarbonInterface;
 use DomainException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class ConfirmSale
 {
@@ -42,7 +43,7 @@ class ConfirmSale
     ) {}
 
     /**
-     * @param  array<int, array{product: Product, quantity: int|float|string, customizations?: array<int, array{product: Product, quantity: int|float|string}>}>  $lines
+     * @param  array<int, array{product: Product, quantity: int|float|string, customizations?: array<int, array{product: Product, quantity: int|float|string, unit_price_base?: int|float|string, note?: string|null}>}>  $lines
      * @param  array<int, array{payment_method: PaymentMethod, amount_base: int|float|string}>  $payments
      * @param  array<int, array{extra: SaleExtra, quantity: int|float|string, unit_price_base?: int|float|string}>  $extras
      */
@@ -217,7 +218,7 @@ class ConfirmSale
     }
 
     /**
-     * @param  array<int, array{product: Product, quantity: int|float|string, customizations?: array<int, array{product: Product, quantity: int|float|string}>}>  $lines
+     * @param  array<int, array{product: Product, quantity: int|float|string, customizations?: array<int, array{product: Product, quantity: int|float|string, unit_price_base?: int|float|string, note?: string|null}>}>  $lines
      * @return Collection<int, Collection<string, mixed>>
      */
     private function prepareItems(Company $company, Warehouse $warehouse, array $lines): Collection
@@ -345,6 +346,9 @@ class ConfirmSale
                     'waste_percentage' => $recipeItem->waste_percentage,
                     'quantity_consumed' => $consumed,
                     'customization_quantity_consumed' => '0.000000',
+                    'customization_unit_price_base' => '0.0000',
+                    'customization_total_price_base' => '0.0000',
+                    'customization_note' => null,
                     'unit_cost_base' => $this->money($unitCost),
                     'total_cost_base' => $componentCost,
                     'customization_total_cost_base' => '0.0000',
@@ -362,14 +366,17 @@ class ConfirmSale
                 $componentId = (int) $customization['product']->getKey();
                 $component = $componentProducts->get($componentId);
                 $customQuantity = Decimal::normalize($customization['quantity'], 6);
+                $customUnitPrice = Decimal::normalize($customization['unit_price_base'] ?? 0, 4);
+                $customizationNote = $this->normalizeCustomizationNote($customization['note'] ?? null);
 
                 if (! $component instanceof Product
                     || ! $component->is_active
                     || $component->item_type !== ProductItemType::Physical
                     || $component->inventory_behavior !== InventoryBehavior::Self
                     || $component->is_sellable
-                    || bccomp($customQuantity, '0', 6) <= 0) {
-                    throw new DomainException('La personalización requiere insumos activos con una cantidad mayor que cero.');
+                    || bccomp($customQuantity, '0', 6) <= 0
+                    || bccomp($customUnitPrice, '0', 4) < 0) {
+                    throw new DomainException('La personalización requiere un insumo activo, una cantidad positiva y un precio no negativo.');
                 }
 
                 $customConsumed = $this->quantity(bcmul($customQuantity, $quantity, 12));
@@ -381,7 +388,9 @@ class ConfirmSale
                 }
 
                 $customCost = $this->money(bcmul($customConsumed, $unitCost, 8));
+                $customPrice = $this->money(bcmul($customConsumed, $customUnitPrice, 8));
                 $itemCost = $this->money(bcadd($itemCost, $customCost, 8));
+                $subtotal = $this->money(bcadd($subtotal, $customPrice, 8));
                 $requirements[$componentId] = [
                     'product' => $component,
                     'quantity' => isset($requirements[$componentId])
@@ -398,12 +407,18 @@ class ConfirmSale
                     'waste_percentage' => '0.000000',
                     'quantity_consumed' => '0.000000',
                     'customization_quantity_consumed' => '0.000000',
+                    'customization_unit_price_base' => '0.0000',
+                    'customization_total_price_base' => '0.0000',
+                    'customization_note' => null,
                     'unit_cost_base' => $this->money($unitCost),
                     'total_cost_base' => '0.0000',
                     'customization_total_cost_base' => '0.0000',
                 ]);
                 $snapshot['customization_quantity'] = $customQuantity;
                 $snapshot['customization_quantity_consumed'] = $customConsumed;
+                $snapshot['customization_unit_price_base'] = $customUnitPrice;
+                $snapshot['customization_total_price_base'] = $customPrice;
+                $snapshot['customization_note'] = $customizationNote;
                 $snapshot['quantity_consumed'] = bcadd($snapshot['quantity_consumed'], $customConsumed, 6);
                 $snapshot['customization_total_cost_base'] = $customCost;
                 $snapshot['total_cost_base'] = $this->money(bcadd($snapshot['total_cost_base'], $customCost, 8));
@@ -589,6 +604,17 @@ class ConfirmSale
         $customerName = $customerName === null ? null : trim($customerName);
 
         return $customerName === '' ? null : $customerName;
+    }
+
+    private function normalizeCustomizationNote(?string $note): ?string
+    {
+        $note = $note === null ? null : trim($note);
+
+        if ($note !== null && Str::length($note) > 500) {
+            throw new DomainException('La observación de la personalización no puede superar 500 caracteres.');
+        }
+
+        return $note === '' ? null : $note;
     }
 
     /**

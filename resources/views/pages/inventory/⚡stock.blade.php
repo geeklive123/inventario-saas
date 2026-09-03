@@ -9,6 +9,8 @@ use App\Enums\ProductItemType;
 use App\Enums\StockMovementType;
 use App\Models\Product;
 use App\Models\StockBalance;
+use App\Models\StockMovement;
+use App\Models\StockMovementLine;
 use App\Models\Warehouse;
 use App\Services\Inventory\InventoryService;
 use App\Support\Authorization\CompanyAccess;
@@ -18,6 +20,7 @@ use Carbon\CarbonImmutable;
 use Flux\Flux;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Number;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Title;
@@ -47,6 +50,10 @@ new #[Title('Inventario')] class extends Component
     public string $reason = '';
 
     public bool $showOperationModal = false;
+
+    public ?int $historyProductId = null;
+
+    public bool $showHistoryModal = false;
 
     public function mount(): void
     {
@@ -114,6 +121,13 @@ new #[Title('Inventario')] class extends Component
         return Number::format((float) $amount, precision: $decimalPlaces, locale: 'es');
     }
 
+    public function formatMovementQuantity(int|float|string $quantity): string
+    {
+        $normalized = Decimal::normalize($quantity, 6);
+
+        return (bccomp($normalized, '0', 6) > 0 ? '+' : '').$this->formatQuantity($normalized);
+    }
+
     public function openOperation(string $operation, ?int $productId = null): void
     {
         abort_unless(in_array($operation, ['opening', 'inbound', 'outbound', 'adjustment'], true), 404);
@@ -135,6 +149,25 @@ new #[Title('Inventario')] class extends Component
         $this->showOperationModal = true;
         $this->updatedProductId();
         Flux::modal('stock-operation')->show();
+    }
+
+    public function openHistory(int $productId): void
+    {
+        Gate::authorize('viewAny', StockMovement::class);
+        $product = Product::query()
+            ->whereKey($productId)
+            ->where('item_type', ProductItemType::Physical)
+            ->where('inventory_behavior', InventoryBehavior::Self)
+            ->first();
+        $warehouseExists = Warehouse::query()->whereKey($this->warehouseId)->exists();
+
+        abort_if($product === null || ! $warehouseExists, 404);
+
+        $this->historyProductId = $productId;
+        $this->showHistoryModal = true;
+        $this->resetPage('historyPage');
+        unset($this->historyProduct, $this->historyMovements);
+        Flux::modal('stock-history')->show();
     }
 
     public function submitOperation(): void
@@ -334,6 +367,40 @@ new #[Title('Inventario')] class extends Component
             ->paginate(15);
     }
 
+    #[Computed]
+    public function historyProduct(): ?Product
+    {
+        return $this->historyProductId === null
+            ? null
+            : Product::query()->with('unit:id,symbol')->findOrFail($this->historyProductId);
+    }
+
+    #[Computed]
+    public function historyMovements(): LengthAwarePaginator
+    {
+        $movementsTable = (new StockMovement)->getTable();
+        $linesTable = (new StockMovementLine)->getTable();
+
+        return StockMovementLine::query()
+            ->with([
+                'movement.createdBy.user:id,name',
+                'movement.reversedMovement:id',
+                'movement.reversals:id,reversal_of_movement_id',
+            ])
+            ->where('product_id', $this->historyProductId ?? 0)
+            ->whereHas('movement', fn ($movement) => $movement->where('warehouse_id', $this->warehouseId))
+            ->orderByDesc(
+                StockMovement::query()
+                    ->withoutGlobalScope('company')
+                    ->select('occurred_at')
+                    ->whereColumn($movementsTable.'.id', $linesTable.'.stock_movement_id')
+                    ->whereColumn($movementsTable.'.company_id', $linesTable.'.company_id')
+                    ->limit(1),
+            )
+            ->orderByDesc('id')
+            ->paginate(10, ['*'], 'historyPage');
+    }
+
     private function todayForCompany(): string
     {
         return now(app(CurrentCompany::class)->company()->timezone)->toDateString();
@@ -438,12 +505,13 @@ new #[Title('Inventario')] class extends Component
                             <flux:table.cell align="end">{{ $currency->symbol }} {{ $this->formatMoney($balance->inventory_value_base) }}</flux:table.cell>
                             <flux:table.cell align="end">{{ $balance->last_inbound_unit_cost_base === null ? '—' : $currency->symbol.' '.$this->formatMoney($balance->last_inbound_unit_cost_base) }}</flux:table.cell>
                             <flux:table.cell>
-                                @if ($this->canAdjust)
-                                    <div class="flex justify-end gap-2">
+                                <div class="flex flex-wrap justify-end gap-2">
+                                    @if ($this->canAdjust)
                                         <flux:button size="sm" variant="subtle" icon="plus" wire:click="openOperation('inbound', {{ $balance->product_id }})">Compra</flux:button>
                                         <flux:button size="sm" variant="subtle" icon="minus" wire:click="openOperation('outbound', {{ $balance->product_id }})">Salida</flux:button>
-                                    </div>
-                                @endif
+                                    @endif
+                                    <flux:button size="sm" variant="subtle" icon="clock" wire:click="openHistory({{ $balance->product_id }})">Historial</flux:button>
+                                </div>
                             </flux:table.cell>
                         </flux:table.row>
                     @empty
@@ -472,6 +540,13 @@ new #[Title('Inventario')] class extends Component
                 @error('operation')
                     <flux:callout variant="danger" icon="x-circle" :heading="$message" />
                 @enderror
+
+                <flux:select wire:model.live="warehouseId" label="Almacén" required>
+                    <flux:select.option value="">Seleccionar</flux:select.option>
+                    @foreach ($this->warehouses as $warehouse)
+                        <flux:select.option :value="$warehouse->id">{{ $warehouse->branch->name }} · {{ $warehouse->name }}</flux:select.option>
+                    @endforeach
+                </flux:select>
 
                 @if ($operation === 'opening' && $this->products->isEmpty())
                     <flux:callout icon="check-circle" heading="Todos los insumos ya tienen una existencia inicial registrada.">
@@ -506,7 +581,7 @@ new #[Title('Inventario')] class extends Component
                         type="number"
                         step="0.0001"
                         min="0"
-                        :label="match ($operation) { 'opening' => 'Costo real por unidad', 'inbound' => 'Costo unitario de compra', default => 'Costo por unidad agregada' }"
+                        :label="match ($operation) { 'opening' => 'Costo real por unidad', 'inbound' => 'Precio unitario pagado', default => 'Costo por unidad agregada' }"
                     />
                 @endif
 
@@ -549,7 +624,7 @@ new #[Title('Inventario')] class extends Component
                 <flux:textarea
                     wire:model="reason"
                     :label="$operation === 'inbound' ? 'Observación' : 'Motivo / observación'"
-                    :placeholder="$operation === 'outbound' ? 'Ej.: uso interno, ajuste u otro motivo' : ($operation === 'opening' ? 'Ej.: Inventario inicial' : null)"
+                    :placeholder="match ($operation) { 'inbound' => 'Ej.: Compra proveedor Mercado Floral', 'outbound' => 'Ej.: Uso interno, ajuste u otro motivo', 'opening' => 'Ej.: Inventario inicial', default => 'Ej.: Diferencia encontrada en conteo físico' }"
                     rows="3"
                 />
 
@@ -560,4 +635,73 @@ new #[Title('Inventario')] class extends Component
             </form>
         </flux:modal>
     @endif
+
+    <flux:modal name="stock-history" wire:model.self="showHistoryModal" class="max-w-[95vw]">
+        @if ($this->historyProduct)
+            <div class="space-y-5">
+                <div>
+                    <flux:heading size="lg">Historial de {{ $this->historyProduct->name }}</flux:heading>
+                    <flux:text>
+                        {{ $this->historyProduct->sku }} · {{ $this->historyProduct->unit->symbol }} ·
+                        {{ $this->warehouses->firstWhere('id', $warehouseId)?->branch?->name }} ·
+                        {{ $this->warehouses->firstWhere('id', $warehouseId)?->name }}
+                    </flux:text>
+                </div>
+
+                <flux:callout icon="information-circle">
+                    Los importes y cantidades son los valores guardados al registrar cada operación; no se recalculan con el stock actual.
+                </flux:callout>
+
+                <div class="overflow-x-auto">
+                    <flux:table :paginate="$this->historyMovements">
+                        <flux:table.columns>
+                            <flux:table.column>Fecha y hora</flux:table.column>
+                            <flux:table.column>Tipo</flux:table.column>
+                            <flux:table.column align="end">Movimiento</flux:table.column>
+                            <flux:table.column align="end">Antes</flux:table.column>
+                            <flux:table.column align="end">Después</flux:table.column>
+                            <flux:table.column align="end">Precio / costo unitario</flux:table.column>
+                            <flux:table.column align="end">Costo promedio antes</flux:table.column>
+                            <flux:table.column align="end">Costo promedio después</flux:table.column>
+                            <flux:table.column align="end">Valor antes</flux:table.column>
+                            <flux:table.column align="end">Valor después</flux:table.column>
+                            <flux:table.column>Observación</flux:table.column>
+                            <flux:table.column>Responsable</flux:table.column>
+                        </flux:table.columns>
+                        <flux:table.rows>
+                            @forelse ($this->historyMovements as $line)
+                                <flux:table.row wire:key="stock-history-line-{{ $line->id }}">
+                                    <flux:table.cell>{{ $line->movement->occurred_at->timezone(app(CurrentCompany::class)->company()->timezone)->format('d/m/Y H:i') }}</flux:table.cell>
+                                    <flux:table.cell>
+                                        <div class="space-y-1">
+                                            <flux:badge :color="$line->movement->type->color()">{{ $line->movement->type->label() }}</flux:badge>
+                                            @if ($line->movement->reversal_of_movement_id)
+                                                <flux:text size="sm">Revierte #{{ $line->movement->reversal_of_movement_id }}</flux:text>
+                                            @elseif ($reversal = $line->movement->reversals->first())
+                                                <flux:text size="sm">Revertido por #{{ $reversal->id }}</flux:text>
+                                            @endif
+                                        </div>
+                                    </flux:table.cell>
+                                    <flux:table.cell align="end"><span class="font-semibold {{ bccomp($line->quantity, '0', 6) < 0 ? 'text-red-600 dark:text-red-400' : 'text-green-700 dark:text-green-400' }}">{{ $this->formatMovementQuantity($line->quantity) }} {{ $this->historyProduct->unit->symbol }}</span></flux:table.cell>
+                                    <flux:table.cell align="end">{{ $this->formatQuantity($line->quantity_before) }}</flux:table.cell>
+                                    <flux:table.cell align="end">{{ $this->formatQuantity($line->quantity_after) }}</flux:table.cell>
+                                    <flux:table.cell align="end">{{ $currency->symbol }} {{ $this->formatMoney($line->unit_cost_base) }}</flux:table.cell>
+                                    <flux:table.cell align="end">{{ $currency->symbol }} {{ $this->formatMoney($line->average_unit_cost_before_base) }}</flux:table.cell>
+                                    <flux:table.cell align="end">{{ $currency->symbol }} {{ $this->formatMoney($line->average_unit_cost_after_base) }}</flux:table.cell>
+                                    <flux:table.cell align="end">{{ $currency->symbol }} {{ $this->formatMoney($line->inventory_value_before_base) }}</flux:table.cell>
+                                    <flux:table.cell align="end">{{ $currency->symbol }} {{ $this->formatMoney($line->inventory_value_after_base) }}</flux:table.cell>
+                                    <flux:table.cell>{{ $line->movement->reason ?: 'Sin observación' }}</flux:table.cell>
+                                    <flux:table.cell>{{ $line->movement->createdBy->user->name }}</flux:table.cell>
+                                </flux:table.row>
+                            @empty
+                                <flux:table.row>
+                                    <flux:table.cell colspan="12"><div class="py-10 text-center"><flux:heading>Sin movimientos</flux:heading><flux:text>Este insumo todavía no tiene operaciones en el almacén seleccionado.</flux:text></div></flux:table.cell>
+                                </flux:table.row>
+                            @endforelse
+                        </flux:table.rows>
+                    </flux:table>
+                </div>
+            </div>
+        @endif
+    </flux:modal>
 </div>

@@ -16,6 +16,7 @@ use App\Models\Sale;
 use App\Models\SaleExtra;
 use App\Models\Warehouse;
 use App\Support\Authorization\CompanyAccess;
+use App\Support\Decimal;
 use App\Support\Tenancy\CurrentCompany;
 use Carbon\Carbon;
 use Flux\Flux;
@@ -47,7 +48,7 @@ new #[Title('Ventas')] class extends Component
 
     public ?int $warehouseId = null;
 
-    /** @var array<int, array{product_id: int|null, quantity: string, customizations: array<int, array{product_id: int|null, quantity: string}>}> */
+    /** @var array<int, array{product_id: int|null, quantity: string, customizations: array<int, array{product_id: int|null, quantity: string, unit_price_base: string, note: string}>}> */
     public array $saleLines = [];
 
     /** @var array<int, array{payment_method_id: int|null, amount_base: string}> */
@@ -112,7 +113,12 @@ new #[Title('Ventas')] class extends Component
 
     public function addCustomization(int $lineIndex): void
     {
-        $this->saleLines[$lineIndex]['customizations'][] = ['product_id' => null, 'quantity' => '1'];
+        $this->saleLines[$lineIndex]['customizations'][] = [
+            'product_id' => null,
+            'quantity' => '1',
+            'unit_price_base' => '',
+            'note' => '',
+        ];
     }
 
     public function removeCustomization(int $lineIndex, int $customizationIndex): void
@@ -190,8 +196,15 @@ new #[Title('Ventas')] class extends Component
             'saleLines.*.product_id' => ['required', Rule::exists('products', 'id')->where('company_id', $companyId)],
             'saleLines.*.quantity' => ['required', 'numeric', 'gt:0'],
             'saleLines.*.customizations' => ['array'],
-            'saleLines.*.customizations.*.product_id' => ['required', Rule::exists('products', 'id')->where('company_id', $companyId)->where('is_active', true)->where('is_sellable', false)],
+            'saleLines.*.customizations.*.product_id' => ['required', Rule::exists('products', 'id')
+                ->where('company_id', $companyId)
+                ->where('is_active', 1)
+                ->where('is_sellable', 0)
+                ->where('item_type', ProductItemType::Physical->value)
+                ->where('inventory_behavior', InventoryBehavior::Self->value)],
             'saleLines.*.customizations.*.quantity' => ['required', 'numeric', 'gt:0'],
+            'saleLines.*.customizations.*.unit_price_base' => ['required', 'numeric', 'gte:0'],
+            'saleLines.*.customizations.*.note' => ['nullable', 'string', 'max:500'],
             'paymentLines' => ['array'],
             'paymentLines.*.payment_method_id' => ['required', Rule::exists('payment_methods', 'id')->where('company_id', $companyId)],
             'paymentLines.*.amount_base' => ['required', 'numeric', 'gt:0'],
@@ -230,6 +243,8 @@ new #[Title('Ventas')] class extends Component
                     'customizations' => collect($line['customizations'] ?? [])->map(fn (array $customization): array => [
                         'product' => $customizationProducts->get($customization['product_id']),
                         'quantity' => $customization['quantity'],
+                        'unit_price_base' => $customization['unit_price_base'],
+                        'note' => $customization['note'] ?? null,
                     ])->all(),
                 ])->all(),
                 collect($data['paymentLines'])->map(fn (array $payment): array => [
@@ -370,26 +385,67 @@ new #[Title('Ventas')] class extends Component
         })->filter()->values()->all();
     }
 
-    /** @return array<int, array{name: string, quantity: string, unit_price_base: string, subtotal_base: string}> */
+    /** @return array<int, array{name: string, quantity: string, unit_price_base: string, base_subtotal_base: string, customizations: array<int, array{name: string, quantity: string, unit_price_base: string, subtotal_base: string}>, subtotal_base: string}> */
     #[Computed]
     public function summaryLines(): array
     {
         $bouquets = $this->bouquets->keyBy('id');
+        $supplies = $this->supplies->keyBy('id');
 
-        return collect($this->saleLines)->map(function (array $line) use ($bouquets): ?array {
+        return collect($this->saleLines)->map(function (array $line) use ($bouquets, $supplies): ?array {
             $bouquet = $bouquets->get($line['product_id']);
 
             if (! $bouquet instanceof Product || ! is_numeric($line['quantity']) || (float) $line['quantity'] <= 0) {
                 return null;
             }
 
+            $bouquetQuantity = Decimal::normalize($line['quantity'], 6);
+            $baseSubtotal = $this->money(bcmul($bouquetQuantity, $bouquet->sale_price_base, 8));
+            $customizations = collect($line['customizations'] ?? [])->map(function (array $customization) use ($bouquetQuantity, $supplies): ?array {
+                $supply = $supplies->get($customization['product_id']);
+
+                if (! $supply instanceof Product
+                    || ! is_numeric($customization['quantity'] ?? null)
+                    || ! is_numeric($customization['unit_price_base'] ?? null)
+                    || bccomp(Decimal::normalize($customization['quantity'], 6), '0', 6) <= 0
+                    || bccomp(Decimal::normalize($customization['unit_price_base'], 4), '0', 4) < 0) {
+                    return null;
+                }
+
+                $quantity = Decimal::normalize($customization['quantity'], 6);
+                $unitPrice = Decimal::normalize($customization['unit_price_base'], 4);
+                $consumed = bcmul($bouquetQuantity, $quantity, 6);
+
+                return [
+                    'name' => $supply->name,
+                    'quantity' => $quantity,
+                    'unit_price_base' => $unitPrice,
+                    'subtotal_base' => $this->money(bcmul($consumed, $unitPrice, 8)),
+                ];
+            })->filter()->values();
+            $subtotal = $customizations->reduce(
+                fn (string $total, array $customization): string => $this->money(bcadd($total, $customization['subtotal_base'], 8)),
+                $baseSubtotal,
+            );
+
             return [
                 'name' => $bouquet->name,
-                'quantity' => (string) $line['quantity'],
+                'quantity' => $bouquetQuantity,
                 'unit_price_base' => $bouquet->sale_price_base,
-                'subtotal_base' => bcadd(bcmul((string) $line['quantity'], $bouquet->sale_price_base, 4), '0', 4),
+                'base_subtotal_base' => $baseSubtotal,
+                'customizations' => $customizations->all(),
+                'subtotal_base' => $subtotal,
             ];
         })->filter()->values()->all();
+    }
+
+    /** @return numeric-string */
+    private function money(int|float|string $value): string
+    {
+        $value = Decimal::normalize($value, 8);
+        $adjustment = bccomp($value, '0', 8) < 0 ? '-0.00005' : '0.00005';
+
+        return bcadd(bcadd($value, $adjustment, 8), '0', 4);
     }
 
     #[Computed]
@@ -527,14 +583,14 @@ new #[Title('Ventas')] class extends Component
                 <div class="space-y-3"><div class="flex items-center justify-between"><flux:heading size="sm">Ramos</flux:heading><flux:button type="button" size="sm" icon="plus" wire:click="addSaleLine">Agregar otro ramo</flux:button></div>
                     @foreach($saleLines as $index => $line)
                         @php($summary = collect($this->summaryLines)->firstWhere('name', optional($this->bouquets->firstWhere('id', $line['product_id']))->name))
-                        <flux:card class="space-y-4" wire:key="sale-line-{{ $index }}"><div class="grid items-end gap-3 md:grid-cols-[2fr_1fr_1fr_1fr_auto]"><flux:select wire:model.live="saleLines.{{ $index }}.product_id" label="Ramo" required><flux:select.option value="">Seleccionar ramo</flux:select.option>@foreach($this->bouquets as $bouquet)<flux:select.option :value="$bouquet->id">{{ $bouquet->name }}</flux:select.option>@endforeach</flux:select><flux:input wire:model.live.debounce.250ms="saleLines.{{ $index }}.quantity" type="number" min="0.000001" step="0.000001" label="Cantidad" required /><div><flux:text size="sm">Precio unitario</flux:text><div class="mt-2 font-semibold">{{ $currency->symbol }} {{ $this->formatMoney(optional($this->bouquets->firstWhere('id', $line['product_id']))->sale_price_base ?? 0) }}</div></div><div><flux:text size="sm">Subtotal</flux:text><div class="mt-2 font-semibold">{{ $currency->symbol }} {{ $this->formatMoney($summary['subtotal_base'] ?? 0) }}</div></div><flux:button type="button" variant="ghost" icon="trash" wire:click="removeSaleLine({{ $index }})" :disabled="count($saleLines) === 1" aria-label="Quitar ramo" /></div><div class="rounded-lg bg-zinc-50 p-3 dark:bg-zinc-800/60"><div class="flex items-center justify-between"><div><flux:heading size="sm">Personalización del ramo</flux:heading><flux:text size="sm">Agrega insumos adicionales por cada ramo de esta línea. La receta original no cambiará.</flux:text></div><flux:button type="button" size="sm" variant="subtle" icon="plus" wire:click="addCustomization({{ $index }})">Agregar insumo</flux:button></div>@foreach(($line['customizations'] ?? []) as $customizationIndex => $customization)<div class="mt-3 grid items-end gap-3 sm:grid-cols-[2fr_1fr_auto]" wire:key="customization-{{ $index }}-{{ $customizationIndex }}"><flux:select wire:model="saleLines.{{ $index }}.customizations.{{ $customizationIndex }}.product_id" label="Insumo adicional" required><flux:select.option value="">Seleccionar</flux:select.option>@foreach($this->supplies as $supply)<flux:select.option :value="$supply->id">{{ $supply->name }} · {{ $supply->unit->symbol }}</flux:select.option>@endforeach</flux:select><flux:input wire:model="saleLines.{{ $index }}.customizations.{{ $customizationIndex }}.quantity" type="number" min="0.000001" step="0.000001" label="Cantidad por ramo" required /><flux:button type="button" variant="ghost" icon="trash" wire:click="removeCustomization({{ $index }}, {{ $customizationIndex }})" aria-label="Quitar personalización" /></div>@endforeach</div></flux:card>
+                        <flux:card class="space-y-4" wire:key="sale-line-{{ $index }}"><div class="grid items-end gap-3 md:grid-cols-[2fr_1fr_1fr_1fr_auto]"><flux:select wire:model.live="saleLines.{{ $index }}.product_id" label="Ramo" required><flux:select.option value="">Seleccionar ramo</flux:select.option>@foreach($this->bouquets as $bouquet)<flux:select.option :value="$bouquet->id">{{ $bouquet->name }}</flux:select.option>@endforeach</flux:select><flux:input wire:model.live.debounce.250ms="saleLines.{{ $index }}.quantity" type="number" min="0.000001" step="0.000001" label="Cantidad" required /><div><flux:text size="sm">Precio unitario</flux:text><div class="mt-2 font-semibold">{{ $currency->symbol }} {{ $this->formatMoney(optional($this->bouquets->firstWhere('id', $line['product_id']))->sale_price_base ?? 0) }}</div></div><div><flux:text size="sm">Subtotal</flux:text><div class="mt-2 font-semibold">{{ $currency->symbol }} {{ $this->formatMoney($summary['subtotal_base'] ?? 0) }}</div></div><flux:button type="button" variant="ghost" icon="trash" wire:click="removeSaleLine({{ $index }})" :disabled="count($saleLines) === 1" aria-label="Quitar ramo" /></div><div class="rounded-lg bg-zinc-50 p-3 dark:bg-zinc-800/60"><div class="flex items-center justify-between gap-3"><div><flux:heading size="sm">Personalización del ramo</flux:heading><flux:text size="sm">Agrega insumos adicionales por cada ramo de esta línea. La receta original no cambiará.</flux:text></div><flux:button type="button" size="sm" variant="subtle" icon="plus" wire:click="addCustomization({{ $index }})">Agregar insumo</flux:button></div>@foreach(($line['customizations'] ?? []) as $customizationIndex => $customization)<div class="mt-3 grid items-end gap-3 rounded-lg border border-zinc-200 p-3 md:grid-cols-[2fr_1fr_1fr_auto] dark:border-zinc-700" wire:key="customization-{{ $index }}-{{ $customizationIndex }}"><flux:select wire:model.live="saleLines.{{ $index }}.customizations.{{ $customizationIndex }}.product_id" label="Insumo adicional" required><flux:select.option value="">Seleccionar</flux:select.option>@foreach($this->supplies as $supply)<flux:select.option :value="$supply->id">{{ $supply->name }} · {{ $supply->unit->symbol }}</flux:select.option>@endforeach</flux:select><flux:input wire:model.live.debounce.250ms="saleLines.{{ $index }}.customizations.{{ $customizationIndex }}.quantity" type="number" min="0.000001" step="0.000001" label="Cantidad por ramo" required /><flux:input wire:model.live.debounce.250ms="saleLines.{{ $index }}.customizations.{{ $customizationIndex }}.unit_price_base" type="number" min="0" step="0.0001" label="Precio unitario ({{ $currency->symbol }})" description="Importe que se cobrará al cliente por cada unidad adicional." required /><flux:button type="button" variant="ghost" icon="trash" wire:click="removeCustomization({{ $index }}, {{ $customizationIndex }})" aria-label="Quitar personalización" /><flux:textarea wire:model="saleLines.{{ $index }}.customizations.{{ $customizationIndex }}.note" label="Observación (opcional)" placeholder="Ej.: Cartera corazón roja" maxlength="500" rows="2" class="md:col-span-3" /></div>@endforeach</div></flux:card>
                     @endforeach
                 </div>
 
                 <div class="space-y-3"><div class="flex items-center justify-between"><div><flux:heading size="sm">Extras</flux:heading><flux:text size="sm">Delivery, tarjetas, globos u otros adicionales.</flux:text></div><flux:button type="button" size="sm" icon="plus" wire:click="addExtraLine">Agregar extra</flux:button></div>@foreach($extraLines as $index => $line)<div class="grid items-end gap-3 md:grid-cols-[2fr_1fr_1fr_auto]" wire:key="extra-line-{{ $index }}"><flux:select wire:model.live="extraLines.{{ $index }}.extra_id" label="Extra" required><flux:select.option value="">Seleccionar</flux:select.option>@foreach($this->extras as $extra)<flux:select.option :value="$extra->id">{{ $extra->name }}</flux:select.option>@endforeach</flux:select><flux:input wire:model.live.debounce.250ms="extraLines.{{ $index }}.quantity" type="number" min="0.000001" step="0.000001" label="Cantidad" required /><flux:input wire:model.live.debounce.250ms="extraLines.{{ $index }}.unit_price_base" type="number" min="0" step="0.0001" label="Precio" :readonly="! $this->canOverrideExtraPrice" required /><flux:button type="button" variant="ghost" icon="trash" wire:click="removeExtraLine({{ $index }})" /></div>@endforeach</div>
 
                 <div class="grid gap-6 lg:grid-cols-2"><div class="space-y-3"><div class="flex items-center justify-between"><div><flux:heading size="sm">Pago inicial (opcional)</flux:heading><flux:text size="sm">{{ $this->canRegisterPayments ? 'Puedes dejar la venta pendiente o cobrar una parte.' : 'La venta quedará pendiente; no tienes permiso para registrar cobros.' }}</flux:text></div>@if($this->canRegisterPayments)<flux:button type="button" size="sm" icon="plus" wire:click="addPaymentLine">Agregar pago</flux:button>@endif</div>@foreach($paymentLines as $index => $payment)<div class="grid items-end gap-3 sm:grid-cols-[1fr_1fr_auto]" wire:key="payment-line-{{ $index }}"><flux:select wire:model="paymentLines.{{ $index }}.payment_method_id" label="Método" required><flux:select.option value="">Seleccionar</flux:select.option>@foreach($this->paymentMethods as $method)<flux:select.option :value="$method->id">{{ $method->name }}</flux:select.option>@endforeach</flux:select><flux:input wire:model.live.debounce.250ms="paymentLines.{{ $index }}.amount_base" type="number" min="0.0001" step="0.0001" label="Importe" required><x-slot name="append"><flux:button type="button" size="sm" variant="subtle" wire:click="fillRemainingPayment({{ $index }})">Completar</flux:button></x-slot></flux:input><flux:button type="button" variant="ghost" icon="trash" wire:click="removePaymentLine({{ $index }})" /></div>@endforeach</div>
-                    <flux:card class="space-y-3 bg-zinc-50 dark:bg-zinc-800/60"><flux:heading size="sm">Resumen</flux:heading>@foreach([...$this->summaryLines, ...$this->extraSummaryLines] as $line)<div class="flex justify-between gap-3"><span>{{ $line['name'] }} · {{ $this->formatQuantity($line['quantity']) }} × {{ $currency->symbol }} {{ $this->formatMoney($line['unit_price_base']) }}</span><strong>{{ $currency->symbol }} {{ $this->formatMoney($line['subtotal_base']) }}</strong></div>@endforeach<div class="flex justify-between border-t border-zinc-200 pt-3 text-lg dark:border-zinc-700"><strong>Total</strong><strong>{{ $currency->symbol }} {{ $this->formatMoney($this->total) }}</strong></div><div class="flex justify-between"><span>Pagado ahora</span><span>{{ $currency->symbol }} {{ $this->formatMoney($this->paidTotal) }}</span></div><div class="flex justify-between"><span>Saldo pendiente</span><strong>{{ $currency->symbol }} {{ $this->formatMoney(max(0, (float) $this->total - (float) $this->paidTotal)) }}</strong></div>@if(bccomp($this->paidTotal, $this->total, 4) === 1)<flux:text class="text-red-600 dark:text-red-400">El pago no puede superar el total.</flux:text>@endif</flux:card></div>
+                    <flux:card class="space-y-3 bg-zinc-50 dark:bg-zinc-800/60"><flux:heading size="sm">Resumen</flux:heading>@foreach($this->summaryLines as $line)<div><div class="flex justify-between gap-3"><span>{{ $line['name'] }} · {{ $this->formatQuantity($line['quantity']) }} × {{ $currency->symbol }} {{ $this->formatMoney($line['unit_price_base']) }}</span><strong>{{ $currency->symbol }} {{ $this->formatMoney($line['base_subtotal_base']) }}</strong></div>@foreach($line['customizations'] as $customization)<div class="flex justify-between gap-3 ps-4 text-sm text-zinc-600 dark:text-zinc-300"><span>+ {{ $customization['name'] }} · {{ $this->formatQuantity($customization['quantity']) }} por ramo × {{ $currency->symbol }} {{ $this->formatMoney($customization['unit_price_base']) }}</span><strong>{{ $currency->symbol }} {{ $this->formatMoney($customization['subtotal_base']) }}</strong></div>@endforeach</div>@endforeach @foreach($this->extraSummaryLines as $line)<div class="flex justify-between gap-3"><span>{{ $line['name'] }} · {{ $this->formatQuantity($line['quantity']) }} × {{ $currency->symbol }} {{ $this->formatMoney($line['unit_price_base']) }}</span><strong>{{ $currency->symbol }} {{ $this->formatMoney($line['subtotal_base']) }}</strong></div>@endforeach<div class="flex justify-between border-t border-zinc-200 pt-3 text-lg dark:border-zinc-700"><strong>Total</strong><strong>{{ $currency->symbol }} {{ $this->formatMoney($this->total) }}</strong></div><div class="flex justify-between"><span>Pagado ahora</span><span>{{ $currency->symbol }} {{ $this->formatMoney($this->paidTotal) }}</span></div><div class="flex justify-between"><span>Saldo pendiente</span><strong>{{ $currency->symbol }} {{ $this->formatMoney(max(0, (float) $this->total - (float) $this->paidTotal)) }}</strong></div>@if(bccomp($this->paidTotal, $this->total, 4) === 1)<flux:text class="text-red-600 dark:text-red-400">El pago no puede superar el total.</flux:text>@endif</flux:card></div>
                 <div class="flex justify-end gap-3"><flux:modal.close><flux:button variant="ghost">Cancelar</flux:button></flux:modal.close><flux:button type="submit" variant="primary" :disabled="bccomp($this->total, '0', 4) <= 0 || bccomp($this->paidTotal, $this->total, 4) === 1">Confirmar venta</flux:button></div>
             </form>
         </flux:modal>
