@@ -6,6 +6,7 @@ use App\Models\Product;
 use App\Models\Unit;
 use App\Models\User;
 use App\Models\Warehouse;
+use App\Services\Catalog\BouquetAvailabilityCalculator;
 use App\Services\Catalog\BouquetCostCalculator;
 use App\Support\Authorization\CompanyAccess;
 use App\Support\Tenancy\CurrentCompany;
@@ -134,6 +135,11 @@ new #[Title('Ramos')] class extends Component
         return Number::format((float) $amount, precision: $decimalPlaces, locale: 'es');
     }
 
+    public function formatQuantity(int|float|string $quantity): string
+    {
+        return Number::format((float) $quantity, maxPrecision: 6, locale: 'es');
+    }
+
     #[Computed]
     public function bouquets(): LengthAwarePaginator
     {
@@ -160,6 +166,34 @@ new #[Title('Ramos')] class extends Component
         $warehouse = Warehouse::query()->whereKey($this->warehouseId)->where('is_active', true)->firstOrFail();
 
         return app(BouquetCostCalculator::class)->calculate($this->bouquets->getCollection(), $warehouse);
+    }
+
+    /**
+     * @return array<int, array{
+     *     has_recipe: bool,
+     *     available: bool,
+     *     possible_quantity: numeric-string,
+     *     components: list<array{
+     *         product_id: int,
+     *         name: string,
+     *         required_quantity: numeric-string,
+     *         available_quantity: numeric-string,
+     *         missing_quantity: numeric-string,
+     *         possible_quantity: numeric-string,
+     *         sufficient: bool
+     *     }>
+     * }>
+     */
+    #[Computed]
+    public function bouquetAvailability(): array
+    {
+        if (! $this->canViewCosts() || $this->warehouseId === null) {
+            return [];
+        }
+
+        $warehouse = Warehouse::query()->whereKey($this->warehouseId)->where('is_active', true)->firstOrFail();
+
+        return app(BouquetAvailabilityCalculator::class)->calculate($this->bouquets->getCollection(), $warehouse);
     }
 
     #[Computed]
@@ -211,7 +245,7 @@ new #[Title('Ramos')] class extends Component
     <div class="grid gap-4 md:grid-cols-2">
         <flux:input wire:model.live.debounce.300ms="search" icon="magnifying-glass" placeholder="Buscar ramo o SKU" />
         @if ($this->warehouses->isNotEmpty())
-            <flux:select wire:model.live="warehouseId" label="Costos del almacén">
+            <flux:select wire:model.live="warehouseId" label="Almacén para disponibilidad y costos">
                 @foreach ($this->warehouses as $warehouse)
                     <flux:select.option :value="$warehouse->id">{{ $warehouse->branch->name }} · {{ $warehouse->name }}</flux:select.option>
                 @endforeach
@@ -226,6 +260,7 @@ new #[Title('Ramos')] class extends Component
     <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         @forelse ($this->bouquets as $bouquet)
             @php($cost = $this->bouquetCosts[$bouquet->id] ?? null)
+            @php($availability = $this->bouquetAvailability[$bouquet->id] ?? null)
             @php($margin = $cost && $cost['complete'] ? bcsub($bouquet->sale_price_base, $cost['cost_base'], 4) : null)
             <flux:card wire:key="bouquet-{{ $bouquet->id }}">
                 <div class="flex justify-between gap-4">
@@ -237,6 +272,45 @@ new #[Title('Ramos')] class extends Component
                 </div>
 
                 <flux:text class="mt-4">{{ $bouquet->description ?: 'Sin descripción' }}</flux:text>
+
+                @if ($availability)
+                    <div class="mt-5 space-y-3 rounded-xl border border-zinc-200 p-4 dark:border-zinc-700">
+                        <div class="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                                <flux:text size="sm">Disponibilidad</flux:text>
+                                @if (! $availability['has_recipe'])
+                                    <div class="font-semibold">Sin receta activa</div>
+                                    <flux:text size="sm">Indica qué insumos utiliza este ramo.</flux:text>
+                                @elseif ($availability['available'])
+                                    <div class="font-semibold text-green-700 dark:text-green-400">Puedes preparar {{ $availability['possible_quantity'] }} {{ $availability['possible_quantity'] === '1' ? 'ramo' : 'ramos' }}</div>
+                                @else
+                                    <div class="font-semibold text-red-600 dark:text-red-400">No puedes preparar este ramo</div>
+                                @endif
+                            </div>
+                            @if (! $availability['has_recipe'])
+                                <flux:badge color="amber">Sin receta</flux:badge>
+                            @elseif ($availability['available'])
+                                <flux:badge color="green">Disponible</flux:badge>
+                            @else
+                                <flux:badge color="red">Stock insuficiente</flux:badge>
+                            @endif
+                        </div>
+
+                        @if ($availability['has_recipe'] && $availability['components'] !== [])
+                            <details class="group rounded-lg bg-zinc-50 p-3 dark:bg-zinc-800/60">
+                                <summary class="cursor-pointer font-medium text-zinc-700 marker:text-zinc-500 dark:text-zinc-200">Ver ingredientes</summary>
+                                <div class="mt-3 space-y-2">
+                                    @foreach ($availability['components'] as $component)
+                                        <div class="rounded-lg border p-3 text-sm {{ $component['sufficient'] ? 'border-zinc-200 dark:border-zinc-700' : 'border-red-200 bg-red-50 text-red-800 dark:border-red-900/70 dark:bg-red-950/30 dark:text-red-200' }}">
+                                            <div class="font-medium">{{ $component['name'] }}</div>
+                                            <div>Requiere {{ $this->formatQuantity($component['required_quantity']) }} / disponible {{ $this->formatQuantity($component['available_quantity']) }} / faltan {{ $this->formatQuantity($component['missing_quantity']) }}</div>
+                                        </div>
+                                    @endforeach
+                                </div>
+                            </details>
+                        @endif
+                    </div>
+                @endif
 
                 <div class="mt-5 grid grid-cols-2 gap-3 rounded-xl bg-zinc-50 p-4 dark:bg-zinc-800/60">
                     <div>
