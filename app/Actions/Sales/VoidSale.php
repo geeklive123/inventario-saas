@@ -3,6 +3,8 @@
 namespace App\Actions\Sales;
 
 use App\Enums\ModuleCode;
+use App\Enums\SaleInventoryPendingStatus;
+use App\Enums\SaleInventoryStatus;
 use App\Enums\SaleOrderStatus;
 use App\Enums\SaleStatus;
 use App\Enums\SaleStockMovementKind;
@@ -63,28 +65,59 @@ class VoidSale
                 ->where('sale_id', $lockedSale->getKey())
                 ->where('kind', SaleStockMovementKind::Consumption)
                 ->lockForUpdate()
-                ->firstOrFail();
-            $movement = StockMovement::query()
-                ->withoutGlobalScope('company')
-                ->whereKey($link->stock_movement_id)
-                ->where('company_id', $actor->company_id)
-                ->firstOrFail();
-            $reversal = $this->inventory->reverse(
-                $actor,
-                $movement,
-                "Anulación {$lockedSale->number}: {$reason}",
-                $occurredAt,
-            );
+                ->first();
 
-            SaleStockMovement::query()->create([
-                'company_id' => $actor->company_id,
-                'sale_id' => $lockedSale->getKey(),
-                'stock_movement_id' => $reversal->getKey(),
-                'kind' => SaleStockMovementKind::Reversal,
-            ]);
+            if ($link instanceof SaleStockMovement) {
+                $movement = StockMovement::query()
+                    ->withoutGlobalScope('company')
+                    ->whereKey($link->stock_movement_id)
+                    ->where('company_id', $actor->company_id)
+                    ->firstOrFail();
+                $reversal = $this->inventory->reverse(
+                    $actor,
+                    $movement,
+                    "Anulación {$lockedSale->number}: {$reason}",
+                    $occurredAt,
+                );
+
+                SaleStockMovement::query()->create([
+                    'company_id' => $actor->company_id,
+                    'sale_id' => $lockedSale->getKey(),
+                    'stock_movement_id' => $reversal->getKey(),
+                    'kind' => SaleStockMovementKind::Reversal,
+                ]);
+            }
+
+            $inventoryPendings = $lockedSale->inventoryPendings()
+                ->with('stockMovement')
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
+            $regularizationMovements = $inventoryPendings
+                ->whereNotNull('stock_movement_id')
+                ->pluck('stockMovement')
+                ->filter()
+                ->sortBy('id');
+
+            foreach ($regularizationMovements as $regularizationMovement) {
+                $this->inventory->reverse(
+                    $actor,
+                    $regularizationMovement,
+                    "Anulación {$lockedSale->number}: {$reason}",
+                    $occurredAt,
+                );
+            }
+
+            foreach ($inventoryPendings->where('status', SaleInventoryPendingStatus::Pending) as $inventoryPending) {
+                $inventoryPending->update(['status' => SaleInventoryPendingStatus::Cancelled]);
+            }
+
             $lockedSale->update([
                 'status' => SaleStatus::Voided,
                 'order_status' => SaleOrderStatus::Cancelled,
+                'inventory_status' => $lockedSale->inventory_status === SaleInventoryStatus::PendingRegularization
+                    ? SaleInventoryStatus::Cancelled
+                    : $lockedSale->inventory_status,
                 'voided_by_membership_id' => $actor->getKey(),
                 'voided_at' => $occurredAt ?? now(),
                 'void_reason' => $reason,
@@ -94,6 +127,7 @@ class VoidSale
                 'items.components', 'extraLines', 'payments.receivedBy.user',
                 'stockMovementLinks.stockMovement.lines.product',
                 'confirmedBy.user', 'voidedBy.user',
+                'inventoryPendings.stockMovement.reversals',
             ]);
         }, attempts: 3);
     }

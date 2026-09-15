@@ -4,6 +4,8 @@ use App\Actions\Sales\RegisterSalePayment;
 use App\Actions\Sales\UpdateSaleOrderStatus;
 use App\Actions\Sales\VoidSale;
 use App\Enums\SaleOrderStatus;
+use App\Enums\SaleInventoryPendingStatus;
+use App\Enums\SaleInventoryStatus;
 use App\Enums\SaleStatus;
 use App\Models\PaymentMethod;
 use App\Models\Sale;
@@ -151,6 +153,7 @@ new #[Title('Detalle de venta')] class extends Component
         return Sale::query()->with([
             'items.components', 'extraLines', 'payments.receivedBy.user', 'confirmedBy.user', 'voidedBy.user',
             'stockMovementLinks.stockMovement.lines.product',
+            'inventoryPendings.regularizationLines.actualProduct',
         ])->findOrFail($this->saleId);
     }
 
@@ -179,6 +182,15 @@ new #[Title('Detalle de venta')] class extends Component
     }
 
     #[Computed]
+    public function canRegularizeInventory(): bool
+    {
+        $pending = $this->sale->inventoryPendings
+            ->firstWhere('status', SaleInventoryPendingStatus::Pending);
+
+        return $pending !== null && auth()->user()->can('update', $pending);
+    }
+
+    #[Computed]
     public function paymentMethods(): Collection
     {
         return PaymentMethod::query()->where('is_active', true)->orderBy('name')->get();
@@ -188,17 +200,37 @@ new #[Title('Detalle de venta')] class extends Component
     #[Computed]
     public function consumedComponents(): array
     {
-        return $this->sale->items->flatMap->components
-            ->groupBy('product_id')
+        $automatic = $this->sale->items->flatMap->components
+            ->filter(fn ($component): bool => bccomp($component->quantity_consumed, '0', 6) === 1)
+            ->map(fn ($component): array => [
+                'key' => 'product-'.$component->product_id,
+                'name' => $component->product_name,
+                'sku' => $component->product_sku,
+                'unit_symbol' => $component->unit_symbol,
+                'quantity' => $component->quantity_consumed,
+                'cost' => $component->total_cost_base,
+            ]);
+        $regularized = $this->sale->inventoryPendings->flatMap->regularizationLines
+            ->map(fn ($line): array => [
+                'key' => 'product-'.$line->actual_product_id,
+                'name' => $line->actual_product_name,
+                'sku' => $line->actual_product_sku,
+                'unit_symbol' => $line->unit_symbol,
+                'quantity' => $line->quantity,
+                'cost' => $line->total_cost_base,
+            ]);
+
+        return $automatic->merge($regularized)
+            ->groupBy('key')
             ->map(function ($components): array {
                 $first = $components->first();
 
                 return [
-                    'name' => $first->product_name,
-                    'sku' => $first->product_sku,
-                    'unit_symbol' => $first->unit_symbol,
-                    'quantity' => $components->reduce(fn (string $total, $component): string => bcadd($total, $component->quantity_consumed, 6), '0.000000'),
-                    'cost' => $components->reduce(fn (string $total, $component): string => bcadd($total, $component->total_cost_base, 4), '0.0000'),
+                    'name' => $first['name'],
+                    'sku' => $first['sku'],
+                    'unit_symbol' => $first['unit_symbol'],
+                    'quantity' => $components->reduce(fn (string $total, array $component): string => bcadd($total, $component['quantity'], 6), '0.000000'),
+                    'cost' => $components->reduce(fn (string $total, array $component): string => bcadd($total, $component['cost'], 4), '0.0000'),
                 ];
             })->values()->all();
     }
@@ -215,7 +247,17 @@ new #[Title('Detalle de venta')] class extends Component
 
     @if($sale->status === SaleStatus::Voided)<flux:callout variant="danger" icon="x-circle" heading="Venta anulada">{{ $sale->void_reason }} · {{ $sale->voided_at?->timezone($company->timezone)->format('d/m/Y H:i') }} · {{ $sale->voidedBy?->user?->name }}</flux:callout>@endif
 
-    <flux:card class="grid gap-5 sm:grid-cols-2 lg:grid-cols-3"><div><flux:text size="sm">Fecha</flux:text><div class="font-semibold">{{ $sale->occurred_at->timezone($company->timezone)->format('d/m/Y H:i') }}</div></div><div><flux:text size="sm">Responsable</flux:text><div class="font-semibold">{{ $sale->confirmedBy->user->name }}</div></div><div><flux:text size="sm">Cliente</flux:text><div class="font-semibold">{{ $sale->customer_name ?: 'Consumidor final' }}</div></div><div><flux:text size="sm">Sucursal</flux:text><div class="font-semibold">{{ $sale->branch_name }}</div></div><div><flux:text size="sm">Estado del pago</flux:text><flux:badge :color="$sale->payment_status->color()">{{ $sale->payment_status->label() }}</flux:badge></div><div>@if($this->canUpdateOrderStatus)<form wire:submit="updateOrderStatus" class="space-y-2"><flux:select wire:model.live="orderStatus" label="Estado del pedido" required>@foreach(SaleOrderStatus::cases() as $state)@if($state !== SaleOrderStatus::Cancelled)<flux:select.option :value="$state->value">{{ $state->label() }}</flux:select.option>@endif @endforeach</flux:select><flux:input wire:model="deliveryAt" type="datetime-local" label="Fecha y hora de entrega" :required="$orderStatus === SaleOrderStatus::Reserved->value" /><flux:button size="sm" type="submit">Actualizar</flux:button></form>@else<flux:text size="sm">Estado del pedido</flux:text><strong>{{ $sale->order_status->label() }}</strong><flux:text size="sm" class="mt-2">Entrega: {{ $sale->delivery_at?->timezone($company->timezone)->format('d/m/Y H:i') ?? 'No indicada' }}</flux:text>@endif</div></flux:card>
+    @if($sale->inventory_status === SaleInventoryStatus::PendingRegularization)
+        <flux:callout variant="warning" icon="exclamation-triangle" heading="Inventario pendiente de regularizar">
+            <div class="space-y-3">
+                <p>{{ $sale->items->flatMap->components->filter(fn($component) => bccomp($component->quantity_consumed, '0', 6) === 1)->count() }} insumos fueron descontados automáticamente. {{ $sale->inventoryPendings->where('status', SaleInventoryPendingStatus::Pending)->count() }} insumos están pendientes.</p>
+                <div class="grid gap-2 sm:grid-cols-2">@foreach($sale->inventoryPendings->where('status', SaleInventoryPendingStatus::Pending) as $pending)<div class="flex justify-between rounded-lg bg-amber-50 p-2 dark:bg-amber-950/30"><span>{{ $pending->original_component_name }}</span><strong>{{ $this->formatQuantity($pending->required_quantity) }} {{ $pending->unit_symbol }}</strong></div>@endforeach</div>
+                @if($this->canRegularizeInventory)<flux:button variant="primary" :href="route('inventory.regularizations.show', $sale->inventoryPendings->firstWhere('status', SaleInventoryPendingStatus::Pending)->id)" wire:navigate>Regularizar inventario</flux:button>@endif
+            </div>
+        </flux:callout>
+    @endif
+
+    <flux:card class="grid gap-5 sm:grid-cols-2 lg:grid-cols-3"><div><flux:text size="sm">Fecha</flux:text><div class="font-semibold">{{ $sale->occurred_at->timezone($company->timezone)->format('d/m/Y H:i') }}</div></div><div><flux:text size="sm">Responsable</flux:text><div class="font-semibold">{{ $sale->confirmedBy->user->name }}</div></div><div><flux:text size="sm">Cliente</flux:text><div class="font-semibold">{{ $sale->customer_name ?: 'Consumidor final' }}</div></div><div><flux:text size="sm">Sucursal</flux:text><div class="font-semibold">{{ $sale->branch_name }}</div></div><div><flux:text size="sm">Estado del pago</flux:text><flux:badge :color="$sale->payment_status->color()">{{ $sale->payment_status->label() }}</flux:badge></div><div><flux:text size="sm">Estado del inventario</flux:text><flux:badge :color="$sale->inventory_status->color()">{{ $sale->inventory_status->label() }}</flux:badge></div><div>@if($this->canUpdateOrderStatus)<form wire:submit="updateOrderStatus" class="space-y-2"><flux:select wire:model.live="orderStatus" label="Estado del pedido" required>@foreach(SaleOrderStatus::cases() as $state)@if($state !== SaleOrderStatus::Cancelled)<flux:select.option :value="$state->value">{{ $state->label() }}</flux:select.option>@endif @endforeach</flux:select><flux:input wire:model="deliveryAt" type="datetime-local" label="Fecha y hora de entrega" :required="$orderStatus === SaleOrderStatus::Reserved->value" /><flux:button size="sm" type="submit">Actualizar</flux:button></form>@else<flux:text size="sm">Estado del pedido</flux:text><strong>{{ $sale->order_status->label() }}</strong><flux:text size="sm" class="mt-2">Entrega: {{ $sale->delivery_at?->timezone($company->timezone)->format('d/m/Y H:i') ?? 'No indicada' }}</flux:text>@endif</div></flux:card>
 
     <div class="grid gap-6 xl:grid-cols-2"><flux:card><flux:heading size="sm" class="mb-4">Ramos y extras</flux:heading><div class="space-y-3">@foreach($sale->items as $item)<div class="flex justify-between gap-3 border-b border-zinc-200 pb-3 dark:border-zinc-700"><div><strong>{{ $item->product_name }}</strong><flux:text size="sm">{{ $this->formatQuantity($item->quantity) }} × {{ $currency->symbol }} {{ $this->formatMoney($item->unit_price_base) }}</flux:text>@if($item->components->where('customization_quantity', '>', 0)->isNotEmpty())<div class="mt-2 space-y-2"><flux:text size="sm" class="font-medium">Personalización del ramo</flux:text>@foreach($item->components->where('customization_quantity', '>', 0) as $component)<div class="rounded-lg bg-zinc-50 p-2 dark:bg-zinc-800/60"><div class="flex flex-wrap justify-between gap-2 text-sm"><span>+ {{ $component->product_name }} × {{ $this->formatQuantity($component->customization_quantity) }} por ramo</span><strong>{{ $currency->symbol }} {{ $this->formatMoney($component->customization_unit_price_base) }} c/u · {{ $currency->symbol }} {{ $this->formatMoney($component->customization_total_price_base) }}</strong></div>@if($component->customization_note)<flux:text size="sm">“{{ $component->customization_note }}”</flux:text>@endif</div>@endforeach</div>@endif</div><strong>{{ $currency->symbol }} {{ $this->formatMoney($item->subtotal_base) }}</strong></div>@endforeach @foreach($sale->extraLines as $extra)<div class="flex justify-between gap-3 border-b border-zinc-200 pb-3 dark:border-zinc-700"><div><strong>{{ $extra->extra_name }}</strong><flux:text size="sm">Extra · {{ $this->formatQuantity($extra->quantity) }} × {{ $currency->symbol }} {{ $this->formatMoney($extra->unit_price_base) }}</flux:text></div><strong>{{ $currency->symbol }} {{ $this->formatMoney($extra->subtotal_base) }}</strong></div>@endforeach<div class="flex justify-between pt-2 text-lg"><strong>Total</strong><strong>{{ $currency->symbol }} {{ $this->formatMoney($sale->total_base) }}</strong></div></div></flux:card>
         <flux:card><div class="mb-4 flex items-center justify-between"><flux:heading size="sm">Historial de pagos</flux:heading><flux:badge :color="$sale->payment_status->color()">{{ $sale->payment_status->label() }}</flux:badge></div><div class="space-y-3">@forelse($sale->payments as $payment)<div class="flex justify-between gap-3"><div><strong>{{ $payment->payment_method_name }}</strong><flux:text size="sm">{{ $payment->occurred_at?->timezone($company->timezone)->format('d/m/Y H:i') }} · {{ $payment->receivedBy?->user?->name ?? 'Responsable histórico' }}</flux:text></div><strong>{{ $currency->symbol }} {{ $this->formatMoney($payment->amount_base) }}</strong></div>@empty<flux:text>Sin pagos registrados.</flux:text>@endforelse</div>@if($this->canViewBalance)<div class="mt-5 grid gap-4 border-t border-zinc-200 pt-4 sm:grid-cols-3 dark:border-zinc-700"><div><flux:text size="sm">Total</flux:text><strong>{{ $currency->symbol }} {{ $this->formatMoney($sale->total_base) }}</strong></div><div><flux:text size="sm">Pagado</flux:text><strong>{{ $currency->symbol }} {{ $this->formatMoney($sale->paid_total_base) }}</strong></div><div><flux:text size="sm">Saldo</flux:text><strong>{{ $currency->symbol }} {{ $this->formatMoney($sale->balance_due_base) }}</strong></div></div>@endif</flux:card></div>

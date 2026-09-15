@@ -48,6 +48,12 @@ class Warehouse extends Model
         return $this->hasMany(Sale::class);
     }
 
+    /** @return HasMany<SaleInventoryPending, $this> */
+    public function saleInventoryPendings(): HasMany
+    {
+        return $this->hasMany(SaleInventoryPending::class);
+    }
+
     /** @return array<string, string> */
     protected function casts(): array
     {

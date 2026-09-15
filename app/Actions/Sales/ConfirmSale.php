@@ -7,6 +7,8 @@ use App\Enums\MembershipStatus;
 use App\Enums\ModuleCode;
 use App\Enums\PaymentStatus;
 use App\Enums\ProductItemType;
+use App\Enums\SaleInventoryPendingStatus;
+use App\Enums\SaleInventoryStatus;
 use App\Enums\SaleOrderStatus;
 use App\Enums\SaleStatus;
 use App\Enums\SaleStockMovementKind;
@@ -20,6 +22,7 @@ use App\Models\ProductRecipe;
 use App\Models\Sale;
 use App\Models\SaleExtra;
 use App\Models\SaleExtraLine;
+use App\Models\SaleInventoryPending;
 use App\Models\SaleItem;
 use App\Models\SaleItemComponent;
 use App\Models\SalePayment;
@@ -31,6 +34,7 @@ use App\Support\Authorization\CompanyAccess;
 use App\Support\Decimal;
 use Carbon\CarbonInterface;
 use DomainException;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -106,7 +110,12 @@ class ConfirmSale
             $paymentStatus = bccomp($paidTotal, '0', 4) === 0
                 ? PaymentStatus::Pending
                 : (bccomp($balance, '0', 4) === 0 ? PaymentStatus::Paid : PaymentStatus::Partial);
-            $totalCost = $this->sumMoney($preparedItems->pluck('total_cost_base'));
+            $hasPendingInventory = $preparedItems->contains(
+                fn (Collection $item): bool => $item['components']->contains(
+                    fn (array $component): bool => isset($component['_pending_required_quantity']),
+                ),
+            );
+            $totalCost = $hasPendingInventory ? null : $this->sumMoney($preparedItems->pluck('total_cost_base'));
             $sequence = (int) Sale::query()
                 ->withoutGlobalScope('company')
                 ->where('company_id', $company->getKey())
@@ -126,13 +135,16 @@ class ConfirmSale
                 'status' => SaleStatus::Confirmed,
                 'order_status' => $orderStatus,
                 'payment_status' => $paymentStatus,
+                'inventory_status' => $hasPendingInventory
+                    ? SaleInventoryStatus::PendingRegularization
+                    : SaleInventoryStatus::Complete,
                 'subtotal_base' => $subtotal,
                 'extras_total_base' => $extrasTotal,
                 'total_base' => $total,
                 'paid_total_base' => $paidTotal,
                 'balance_due_base' => $balance,
                 'total_cost_base' => $totalCost,
-                'gross_margin_base' => $this->money(bcsub($total, $totalCost, 8)),
+                'gross_margin_base' => $totalCost === null ? null : $this->money(bcsub($total, $totalCost, 8)),
                 'confirmed_by_membership_id' => $lockedActor->getKey(),
                 'occurred_at' => $occurredAt ?? now(),
                 'delivery_at' => $deliveryAt,
@@ -147,11 +159,28 @@ class ConfirmSale
                 ]);
 
                 foreach ($preparedItem['components'] as $component) {
-                    SaleItemComponent::query()->create([
+                    $pendingQuantity = $component['_pending_required_quantity'] ?? null;
+                    $componentSnapshot = SaleItemComponent::query()->create([
                         'company_id' => $company->getKey(),
                         'sale_item_id' => $item->getKey(),
-                        ...$component,
+                        ...Arr::except($component, '_pending_required_quantity'),
                     ]);
+
+                    if ($pendingQuantity !== null) {
+                        SaleInventoryPending::query()->create([
+                            'company_id' => $company->getKey(),
+                            'sale_id' => $sale->getKey(),
+                            'sale_item_id' => $item->getKey(),
+                            'warehouse_id' => $warehouse->getKey(),
+                            'original_component_product_id' => $componentSnapshot->product_id,
+                            'original_component_name' => $componentSnapshot->product_name,
+                            'original_component_sku' => $componentSnapshot->product_sku,
+                            'unit_symbol' => $componentSnapshot->unit_symbol,
+                            'required_quantity' => $pendingQuantity,
+                            'regularized_quantity' => '0.000000',
+                            'status' => SaleInventoryPendingStatus::Pending,
+                        ]);
+                    }
                 }
             }
 
@@ -174,26 +203,29 @@ class ConfirmSale
             }
 
             $movementLines = $this->movementLines($preparedItems);
-            $movement = $this->inventory->record(
-                $lockedActor,
-                $warehouse,
-                StockMovementType::Sale,
-                $movementLines,
-                "Venta {$number}",
-                $occurredAt,
-            );
+            if ($movementLines !== []) {
+                $movement = $this->inventory->record(
+                    $lockedActor,
+                    $warehouse,
+                    StockMovementType::Sale,
+                    $movementLines,
+                    "Venta {$number}",
+                    $occurredAt,
+                );
 
-            SaleStockMovement::query()->create([
-                'company_id' => $company->getKey(),
-                'sale_id' => $sale->getKey(),
-                'stock_movement_id' => $movement->getKey(),
-                'kind' => SaleStockMovementKind::Consumption,
-            ]);
+                SaleStockMovement::query()->create([
+                    'company_id' => $company->getKey(),
+                    'sale_id' => $sale->getKey(),
+                    'stock_movement_id' => $movement->getKey(),
+                    'kind' => SaleStockMovementKind::Consumption,
+                ]);
+            }
 
             return $sale->load([
                 'branch', 'warehouse', 'confirmedBy.user', 'items.components',
                 'extraLines.extra', 'payments.paymentMethod', 'payments.receivedBy.user',
                 'stockMovementLinks.stockMovement.lines.product',
+                'inventoryPendings.originalComponent',
             ]);
         }, attempts: 3);
     }
@@ -323,18 +355,17 @@ class ConfirmSale
                 $balance = $balances->get($component->getKey());
                 $unitCost = $this->inventory->currentUnitCost($component, $balance);
 
-                if ($unitCost === null) {
-                    throw new DomainException("No existe un costo conocido para {$component->name}.");
+                $componentCost = $unitCost === null ? null : $this->money(bcmul($consumed, $unitCost, 8));
+                if ($componentCost !== null) {
+                    $itemCost = $this->money(bcadd($itemCost, $componentCost, 8));
                 }
-
-                $componentCost = $this->money(bcmul($consumed, $unitCost, 8));
-                $itemCost = $this->money(bcadd($itemCost, $componentCost, 8));
                 $componentId = (int) $component->getKey();
                 $requirements[$componentId] = [
                     'product' => $component,
                     'quantity' => isset($requirements[$componentId])
                         ? bcadd($requirements[$componentId]['quantity'], $consumed, 6)
                         : $consumed,
+                    'has_known_cost' => ($requirements[$componentId]['has_known_cost'] ?? true) && $unitCost !== null,
                 ];
                 $components->put($componentId, [
                     'product_id' => $componentId,
@@ -349,9 +380,9 @@ class ConfirmSale
                     'customization_unit_price_base' => '0.0000',
                     'customization_total_price_base' => '0.0000',
                     'customization_note' => null,
-                    'unit_cost_base' => $this->money($unitCost),
+                    'unit_cost_base' => $unitCost === null ? null : $this->money($unitCost),
                     'total_cost_base' => $componentCost,
-                    'customization_total_cost_base' => '0.0000',
+                    'customization_total_cost_base' => $unitCost === null ? null : '0.0000',
                 ]);
             }
 
@@ -383,19 +414,18 @@ class ConfirmSale
                 $balance = $balances->get($componentId);
                 $unitCost = $this->inventory->currentUnitCost($component, $balance);
 
-                if ($unitCost === null) {
-                    throw new DomainException("No existe un costo conocido para {$component->name}.");
-                }
-
-                $customCost = $this->money(bcmul($customConsumed, $unitCost, 8));
+                $customCost = $unitCost === null ? null : $this->money(bcmul($customConsumed, $unitCost, 8));
                 $customPrice = $this->money(bcmul($customConsumed, $customUnitPrice, 8));
-                $itemCost = $this->money(bcadd($itemCost, $customCost, 8));
+                if ($customCost !== null) {
+                    $itemCost = $this->money(bcadd($itemCost, $customCost, 8));
+                }
                 $subtotal = $this->money(bcadd($subtotal, $customPrice, 8));
                 $requirements[$componentId] = [
                     'product' => $component,
                     'quantity' => isset($requirements[$componentId])
                         ? bcadd($requirements[$componentId]['quantity'], $customConsumed, 6)
                         : $customConsumed,
+                    'has_known_cost' => ($requirements[$componentId]['has_known_cost'] ?? true) && $unitCost !== null,
                 ];
                 $snapshot = $components->get($componentId, [
                     'product_id' => $componentId,
@@ -410,9 +440,9 @@ class ConfirmSale
                     'customization_unit_price_base' => '0.0000',
                     'customization_total_price_base' => '0.0000',
                     'customization_note' => null,
-                    'unit_cost_base' => $this->money($unitCost),
-                    'total_cost_base' => '0.0000',
-                    'customization_total_cost_base' => '0.0000',
+                    'unit_cost_base' => $unitCost === null ? null : $this->money($unitCost),
+                    'total_cost_base' => $unitCost === null ? null : '0.0000',
+                    'customization_total_cost_base' => $unitCost === null ? null : '0.0000',
                 ]);
                 $snapshot['customization_quantity'] = $customQuantity;
                 $snapshot['customization_quantity_consumed'] = $customConsumed;
@@ -421,7 +451,9 @@ class ConfirmSale
                 $snapshot['customization_note'] = $customizationNote;
                 $snapshot['quantity_consumed'] = bcadd($snapshot['quantity_consumed'], $customConsumed, 6);
                 $snapshot['customization_total_cost_base'] = $customCost;
-                $snapshot['total_cost_base'] = $this->money(bcadd($snapshot['total_cost_base'], $customCost, 8));
+                $snapshot['total_cost_base'] = $snapshot['total_cost_base'] === null || $customCost === null
+                    ? null
+                    : $this->money(bcadd($snapshot['total_cost_base'], $customCost, 8));
                 $components->put($componentId, $snapshot);
             }
 
@@ -442,25 +474,58 @@ class ConfirmSale
             ]));
         }
 
-        $shortages = [];
+        $pendingProductIds = [];
 
         foreach ($requirements as $componentId => $requirement) {
             $available = $balances->has($componentId)
                 ? $balances->get($componentId)->quantity
                 : '0.000000';
 
-            if (bccomp($available, $requirement['quantity'], 6) < 0) {
-                $missing = bcsub($requirement['quantity'], $available, 6);
-                $shortages[] = "No hay suficientes {$requirement['product']->name} para preparar esta venta. "
-                    ."Necesitas: {$requirement['quantity']}. Disponible: {$available}. Faltan: {$missing}.";
+            if (bccomp($available, $requirement['quantity'], 6) < 0 || ! $requirement['has_known_cost']) {
+                $pendingProductIds[] = (int) $componentId;
             }
         }
 
-        if ($shortages !== []) {
-            throw new DomainException(implode("\n", $shortages));
-        }
+        return $prepared->map(
+            fn (Collection $item): Collection => $this->markPendingComponents($item, $pendingProductIds),
+        )->values();
+    }
 
-        return $prepared;
+    /**
+     * @param  Collection<string, mixed>  $item
+     * @param  list<int>  $pendingProductIds
+     * @return Collection<string, mixed>
+     */
+    private function markPendingComponents(Collection $item, array $pendingProductIds): Collection
+    {
+        $hasPending = false;
+        $knownCost = '0.0000';
+        $components = $item['components']->map(function (array $component) use (&$hasPending, &$knownCost, $pendingProductIds): array {
+            if (in_array((int) $component['product_id'], $pendingProductIds, true)) {
+                $hasPending = true;
+                $component['_pending_required_quantity'] = $component['quantity_consumed'];
+                $component['quantity_consumed'] = '0.000000';
+                $component['customization_quantity_consumed'] = '0.000000';
+                $component['unit_cost_base'] = null;
+                $component['total_cost_base'] = null;
+                $component['customization_total_cost_base'] = null;
+
+                return $component;
+            }
+
+            $knownCost = $this->money(bcadd($knownCost, $component['total_cost_base'], 8));
+
+            return $component;
+        });
+
+        $item['components'] = $components;
+        $item['unit_cost_base'] = $hasPending ? null : $this->money(bcdiv($knownCost, $item['quantity'], 8));
+        $item['total_cost_base'] = $hasPending ? null : $knownCost;
+        $item['gross_margin_base'] = $hasPending
+            ? null
+            : $this->money(bcsub($item['subtotal_base'], $knownCost, 8));
+
+        return $item;
     }
 
     /**
@@ -578,11 +643,22 @@ class ConfirmSale
     private function movementLines(Collection $preparedItems): array
     {
         $aggregated = [];
+        $components = $preparedItems->flatMap(fn (Collection $item): Collection => $item['components'])
+            ->filter(fn (array $component): bool => bccomp($component['quantity_consumed'], '0', 6) === 1);
+        $products = Product::query()
+            ->withoutGlobalScope('company')
+            ->whereIn('id', $components->pluck('product_id')->unique())
+            ->get()
+            ->keyBy('id');
 
         foreach ($preparedItems as $item) {
             foreach ($item['components'] as $component) {
+                if (bccomp($component['quantity_consumed'], '0', 6) !== 1) {
+                    continue;
+                }
+
                 $componentId = (int) $component['product_id'];
-                $product = Product::query()->withoutGlobalScope('company')->findOrFail($componentId);
+                $product = $products->get($componentId);
                 $productId = (int) $product->getKey();
                 $quantity = bcmul($component['quantity_consumed'], '-1', 6);
                 $aggregated[$productId] = [

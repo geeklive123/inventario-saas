@@ -307,7 +307,9 @@ class ReportExportData
             'expenses_base' => 'Gastos operativos',
             'estimated_result_base' => 'Resultado estimado',
         ] as $key => $label) {
-            $metrics[] = ['label' => $label, 'value' => $report['profit'][$key], 'type' => 'money'];
+            if ($report['profit'][$key] !== null) {
+                $metrics[] = ['label' => $label, 'value' => $report['profit'][$key], 'type' => 'money'];
+            }
         }
 
         return $this->section('profit', 'Ganancias', $metrics, [], []);

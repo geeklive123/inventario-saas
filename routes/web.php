@@ -30,6 +30,11 @@ Route::middleware(['auth', 'password.changed'])->group(function () {
             Route::livewire('existencias', 'pages::inventory.stock')->name('stock');
             Route::livewire('movimientos', 'pages::inventory.movements')->name('movements');
             Route::livewire('mermas', 'pages::waste')->name('waste');
+            Route::livewire('regularizaciones', 'pages::inventory.sale-regularizations')
+                ->middleware('permission:inventory.regularize_sales')->name('regularizations');
+            Route::livewire('regularizaciones/{pendingId}', 'pages::inventory.regularize-sale')
+                ->whereNumber('pendingId')
+                ->middleware('permission:inventory.regularize_sales')->name('regularizations.show');
         });
 
         Route::middleware(['module:sales', 'permission:sales.view'])->prefix('ventas')->name('sales.')->group(function () {

@@ -3,6 +3,7 @@
 namespace App\Services\Dashboard;
 
 use App\Enums\ExpenseStatus;
+use App\Enums\SaleInventoryStatus;
 use App\Enums\SaleStatus;
 use App\Models\Expense;
 use App\Models\Membership;
@@ -39,6 +40,9 @@ class BusinessDashboard
         }
 
         $saleIds = (clone $sales)->pluck('id');
+        $hasIncompleteCosts = (clone $sales)
+            ->where('inventory_status', SaleInventoryStatus::PendingRegularization)
+            ->exists();
         $salesCount = $saleIds->count();
         $income = $canViewIncome ? Decimal::normalize((clone $sales)->sum('total_base'), 4) : null;
         $collectionsQuery = SalePayment::query()
@@ -50,8 +54,10 @@ class BusinessDashboard
             ->where('company_id', $membership->company_id)
             ->where('status', SaleStatus::Confirmed)
             ->sum('balance_due_base'), 4) : null;
-        $cost = $canViewCosts ? Decimal::normalize((clone $sales)->sum('total_cost_base'), 4) : null;
-        $grossMargin = $canViewProfit ? Decimal::normalize((clone $sales)->sum('gross_margin_base'), 4) : null;
+        $cost = $canViewCosts && ! $hasIncompleteCosts
+            ? Decimal::normalize((clone $sales)->sum('total_cost_base'), 4) : null;
+        $grossMargin = $canViewProfit && ! $hasIncompleteCosts
+            ? Decimal::normalize((clone $sales)->sum('gross_margin_base'), 4) : null;
         $expenses = $canViewExpenses ? Decimal::normalize(Expense::query()
             ->where('company_id', $membership->company_id)
             ->where('status', ExpenseStatus::Confirmed)->whereBetween('occurred_at', [$from, $to])->sum('amount_base'), 4) : null;
@@ -71,7 +77,7 @@ class BusinessDashboard
             'cost_base' => $cost,
             'gross_margin_base' => $grossMargin,
             'expenses_base' => $expenses,
-            'approximate_result_base' => $canViewIncome && $canViewCosts && $canViewExpenses
+            'approximate_result_base' => $canViewIncome && $canViewCosts && $canViewExpenses && $cost !== null
                 ? bcsub(bcsub($income, $cost, 4), $expenses, 4) : null,
             'cash_result_base' => $canViewIncome && $canViewExpenses
                 ? bcsub($collected, $expenses, 4) : null,

@@ -98,6 +98,12 @@ class Membership extends Model
         return $this->hasMany(SalePayment::class, 'received_by_membership_id');
     }
 
+    /** @return HasMany<SaleInventoryPending, $this> */
+    public function regularizedSaleInventoryPendings(): HasMany
+    {
+        return $this->hasMany(SaleInventoryPending::class, 'regularized_by_membership_id');
+    }
+
     /** @return HasMany<Expense, $this> */
     public function expenses(): HasMany
     {

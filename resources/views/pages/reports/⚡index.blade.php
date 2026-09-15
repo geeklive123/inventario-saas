@@ -54,8 +54,12 @@ new #[Title('Reportes')] class extends Component
         );
     }
 
-    public function money(int|float|string $amount): string
+    public function money(int|float|string|null $amount): string
     {
+        if ($amount === null) {
+            return 'Pendiente de regularizar';
+        }
+
         $currency = app(CurrentCompany::class)->company()->baseCurrency;
 
         return $currency->symbol.' '.Number::format(

@@ -5,6 +5,7 @@ namespace Database\Seeders;
 use App\Enums\ModuleCode;
 use App\Models\Module;
 use App\Models\Permission;
+use App\Models\Role;
 use Illuminate\Database\Seeder;
 
 class PermissionSeeder extends Seeder
@@ -51,6 +52,7 @@ class PermissionSeeder extends Seeder
                 'inventory.adjust' => 'Adjust inventory',
                 'inventory.reverse' => 'Reverse inventory movements',
                 'inventory.waste' => 'Register inventory waste',
+                'inventory.regularize_sales' => 'Regularize pending sale inventory',
                 'reports.inventory.view' => 'View inventory reports',
             ],
             ModuleCode::Sales->value => [
@@ -99,5 +101,20 @@ class PermissionSeeder extends Seeder
                 );
             }
         }
+
+        $regularizePermission = Permission::query()
+            ->where('code', 'inventory.regularize_sales')
+            ->firstOrFail();
+
+        Role::query()
+            ->withoutGlobalScope('company')
+            ->where('name', 'Administrador')
+            ->where('is_system', true)
+            ->where('is_active', true)
+            ->each(function (Role $role) use ($regularizePermission): void {
+                $role->permissions()->syncWithoutDetaching([
+                    $regularizePermission->getKey() => ['company_id' => $role->company_id],
+                ]);
+            });
     }
 }

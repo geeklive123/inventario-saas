@@ -23,7 +23,7 @@ class StockMovementPolicy
 
     public function reverse(User $user, StockMovement $movement): bool
     {
-        return $movement->type !== StockMovementType::Sale
+        return ! in_array($movement->type, [StockMovementType::Sale, StockMovementType::SaleRegularization], true)
             && $this->access->allows($user, $movement->company, 'inventory.reverse');
     }
 

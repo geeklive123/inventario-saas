@@ -9,6 +9,7 @@ enum StockMovementType: string
     case AdjustmentOut = 'adjustment_out';
     case Waste = 'waste';
     case Sale = 'sale';
+    case SaleRegularization = 'sale_regularization';
     case Reversal = 'reversal';
 
     public function label(): string
@@ -19,6 +20,7 @@ enum StockMovementType: string
             self::AdjustmentOut => 'Salida',
             self::Waste => 'Merma',
             self::Sale => 'Venta',
+            self::SaleRegularization => 'Regularización de venta',
             self::Reversal => 'Reversión',
         };
     }
@@ -27,7 +29,7 @@ enum StockMovementType: string
     {
         return match ($this) {
             self::Opening, self::AdjustmentIn => 'green',
-            self::AdjustmentOut, self::Waste, self::Sale => 'red',
+            self::AdjustmentOut, self::Waste, self::Sale, self::SaleRegularization => 'red',
             self::Reversal => 'amber',
         };
     }

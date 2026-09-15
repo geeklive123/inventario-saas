@@ -4,6 +4,7 @@ namespace App\Services\Reports;
 
 use App\Enums\ExpenseReceiptType;
 use App\Enums\ExpenseStatus;
+use App\Enums\SaleInventoryStatus;
 use App\Enums\SaleStatus;
 use App\Enums\StockMovementType;
 use App\Models\Expense;
@@ -42,7 +43,12 @@ class BusinessReports
             ->where('status', SaleStatus::Confirmed)->whereBetween('occurred_at', [$from, $to]);
         $salesCount = (clone $confirmedSales)->count();
         $totalSold = Decimal::normalize((clone $confirmedSales)->sum('total_base'), 4);
-        $historicalCost = Decimal::normalize((clone $confirmedSales)->sum('total_cost_base'), 4);
+        $hasIncompleteCosts = (clone $confirmedSales)
+            ->where('inventory_status', SaleInventoryStatus::PendingRegularization)
+            ->exists();
+        $historicalCost = $hasIncompleteCosts
+            ? null
+            : Decimal::normalize((clone $confirmedSales)->sum('total_cost_base'), 4);
         $pending = Decimal::normalize((clone $confirmedSales)->sum('balance_due_base'), 4);
         $voidedCount = Sale::query()->where('company_id', $companyId)
             ->where('status', SaleStatus::Voided)->whereBetween('occurred_at', [$from, $to])->count();
@@ -55,8 +61,8 @@ class BusinessReports
         $confirmedExpenses = Expense::query()->where('company_id', $companyId)
             ->where('status', ExpenseStatus::Confirmed)->whereBetween('occurred_at', [$from, $to]);
         $expenseTotal = Decimal::normalize((clone $confirmedExpenses)->sum('amount_base'), 4);
-        $grossMargin = Decimal::normalize(bcsub($totalSold, $historicalCost, 4), 4);
-        $estimatedResult = Decimal::normalize(bcsub($grossMargin, $expenseTotal, 4), 4);
+        $grossMargin = $historicalCost === null ? null : Decimal::normalize(bcsub($totalSold, $historicalCost, 4), 4);
+        $estimatedResult = $grossMargin === null ? null : Decimal::normalize(bcsub($grossMargin, $expenseTotal, 4), 4);
 
         return [
             'period' => $period,
@@ -170,7 +176,9 @@ class BusinessReports
         $items = (clone $itemsQuery)
             ->select('product_name')->selectRaw('SUM(quantity) as quantity')
             ->selectRaw('SUM(subtotal_base) as income_base')->selectRaw('SUM(total_cost_base) as cost_base')
-            ->selectRaw('SUM(gross_margin_base) as margin_base')->groupBy('product_name')
+            ->selectRaw('SUM(gross_margin_base) as margin_base')
+            ->selectRaw('COUNT(*) as line_count')->selectRaw('COUNT(total_cost_base) as cost_count')
+            ->groupBy('product_name')
             ->orderByDesc('quantity')->limit(10)->get();
 
         return [
@@ -179,8 +187,10 @@ class BusinessReports
                 'name' => $item->product_name,
                 'quantity' => Decimal::normalize($item->quantity, 6),
                 'income_base' => $financial ? Decimal::normalize($item->getAttribute('income_base'), 4) : null,
-                'cost_base' => $financial ? Decimal::normalize($item->getAttribute('cost_base'), 4) : null,
-                'margin_base' => $financial ? Decimal::normalize($item->getAttribute('margin_base'), 4) : null,
+                'cost_base' => $financial && (int) $item->getAttribute('line_count') === (int) $item->getAttribute('cost_count')
+                    ? Decimal::normalize($item->getAttribute('cost_base'), 4) : null,
+                'margin_base' => $financial && (int) $item->getAttribute('line_count') === (int) $item->getAttribute('cost_count')
+                    ? Decimal::normalize($item->getAttribute('margin_base'), 4) : null,
             ])->all()),
         ];
     }
@@ -200,10 +210,12 @@ class BusinessReports
             ->where('company_id', $companyId)->whereHas('movement', fn (Builder $query) => $query
             ->whereIn('type', $types)->whereBetween('occurred_at', [$from, $to]));
         $purchases = $movementLines([StockMovementType::AdjustmentIn]);
-        $outbound = $movementLines([StockMovementType::AdjustmentOut, StockMovementType::Sale]);
+        $outbound = $movementLines([
+            StockMovementType::AdjustmentOut, StockMovementType::Sale, StockMovementType::SaleRegularization,
+        ]);
         $waste = $movementLines([StockMovementType::Waste]);
         $mostConsumed = $movementLines([
-            StockMovementType::AdjustmentOut, StockMovementType::Sale, StockMovementType::Waste,
+            StockMovementType::AdjustmentOut, StockMovementType::Sale, StockMovementType::SaleRegularization, StockMovementType::Waste,
         ])->with('product:id,name')->select('product_id')->selectRaw('SUM(ABS(quantity)) as consumed_quantity')
             ->groupBy('product_id')->orderByDesc('consumed_quantity')->limit(10)->get();
 

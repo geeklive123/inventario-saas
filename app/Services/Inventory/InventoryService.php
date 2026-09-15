@@ -366,7 +366,12 @@ class InventoryService
             throw new DomainException('This movement type requires a positive quantity.');
         }
 
-        if (in_array($type, [StockMovementType::AdjustmentOut, StockMovementType::Waste, StockMovementType::Sale], true)
+        if (in_array($type, [
+            StockMovementType::AdjustmentOut,
+            StockMovementType::Waste,
+            StockMovementType::Sale,
+            StockMovementType::SaleRegularization,
+        ], true)
             && bccomp($quantity, '0', 6) >= 0) {
             throw new DomainException('This movement type requires a negative quantity.');
         }

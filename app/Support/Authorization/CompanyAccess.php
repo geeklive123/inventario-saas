@@ -84,6 +84,25 @@ class CompanyAccess
             ->first();
     }
 
+    public function isOwnerOrAdministrator(User $user, Company $company): bool
+    {
+        $membership = $this->activeMembership($user, $company);
+
+        if ($membership === null) {
+            return false;
+        }
+
+        if ($membership->is_owner) {
+            return true;
+        }
+
+        return $membership->roles()
+            ->where('roles.name', 'Administrador')
+            ->where('roles.is_system', true)
+            ->where('roles.is_active', true)
+            ->exists();
+    }
+
     public function moduleEnabled(Company $company, ModuleCode $moduleCode): bool
     {
         return CompanyModule::query()

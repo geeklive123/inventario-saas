@@ -118,7 +118,7 @@ new #[Title('Movimientos de inventario')] class extends Component
     public function selectedMovement(): ?StockMovement
     {
         return $this->selectedId
-            ? StockMovement::query()->with(['warehouse.branch', 'createdBy.user', 'lines.product.unit', 'reversedMovement', 'reversals', 'saleLinks.sale'])->findOrFail($this->selectedId)
+            ? StockMovement::query()->with(['warehouse.branch', 'createdBy.user', 'lines.product.unit', 'reversedMovement', 'reversals', 'saleLinks.sale', 'saleInventoryPendings.sale'])->findOrFail($this->selectedId)
             : null;
     }
 }; ?>
@@ -146,6 +146,7 @@ new #[Title('Movimientos de inventario')] class extends Component
             <flux:select.option value="adjustment_in">Entrada</flux:select.option>
             <flux:select.option value="adjustment_out">Salida</flux:select.option>
             <flux:select.option value="sale">Venta</flux:select.option>
+            <flux:select.option value="sale_regularization">Regularización de venta</flux:select.option>
             <flux:select.option value="waste">Merma</flux:select.option>
             <flux:select.option value="reversal">Reversión</flux:select.option>
         </flux:select>
@@ -172,6 +173,7 @@ new #[Title('Movimientos de inventario')] class extends Component
                                 StockMovementType::AdjustmentIn => 'Entrada',
                                 StockMovementType::AdjustmentOut => 'Salida',
                                 StockMovementType::Sale => 'Venta',
+                                StockMovementType::SaleRegularization => 'Regularización de venta',
                                 StockMovementType::Waste => 'Merma',
                                 StockMovementType::Reversal => 'Reversión',
                             } }}</flux:table.cell>
@@ -235,7 +237,7 @@ new #[Title('Movimientos de inventario')] class extends Component
                     </flux:table>
                 </div>
 
-                @if ($sale = $this->selectedMovement->saleLinks->first()?->sale)
+                @if ($sale = $this->selectedMovement->saleLinks->first()?->sale ?? $this->selectedMovement->saleInventoryPendings->first()?->sale)
                     @can('view', $sale)
                         <flux:callout icon="shopping-bag" heading="Relacionado con {{ $sale->number }}">
                             <flux:button size="sm" variant="subtle" :href="route('sales.show', ['saleId' => $sale->id])" wire:navigate>Ver venta</flux:button>

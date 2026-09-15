@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Enums\PaymentStatus;
+use App\Enums\SaleInventoryStatus;
 use App\Enums\SaleOrderStatus;
 use App\Enums\SaleStatus;
 use App\Models\Concerns\BelongsToCompany;
@@ -22,14 +23,15 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property numeric-string $total_base
  * @property numeric-string $paid_total_base
  * @property numeric-string $balance_due_base
- * @property numeric-string $total_cost_base
- * @property numeric-string $gross_margin_base
+ * @property numeric-string|null $total_cost_base
+ * @property numeric-string|null $gross_margin_base
+ * @property SaleInventoryStatus $inventory_status
  * @property int $confirmed_by_membership_id
  */
 #[Fillable([
     'company_id', 'sequence_number', 'number', 'branch_id', 'warehouse_id', 'customer_id',
     'customer_name', 'branch_name', 'warehouse_name', 'status', 'subtotal_base', 'total_base',
-    'order_status', 'payment_status', 'extras_total_base', 'paid_total_base', 'balance_due_base',
+    'order_status', 'payment_status', 'inventory_status', 'extras_total_base', 'paid_total_base', 'balance_due_base',
     'total_cost_base', 'gross_margin_base', 'confirmed_by_membership_id',
     'voided_by_membership_id', 'occurred_at', 'delivery_at', 'delivery_updated_by_membership_id',
     'voided_at', 'void_reason',
@@ -45,6 +47,7 @@ class Sale extends Model
         'status' => SaleStatus::Confirmed->value,
         'order_status' => SaleOrderStatus::Reserved->value,
         'payment_status' => PaymentStatus::Pending->value,
+        'inventory_status' => SaleInventoryStatus::Complete->value,
         'extras_total_base' => 0,
         'paid_total_base' => 0,
         'balance_due_base' => 0,
@@ -55,11 +58,14 @@ class Sale extends Model
         static::updating(function (Sale $sale): void {
             $allowed = [
                 'status', 'order_status', 'payment_status', 'paid_total_base', 'balance_due_base',
+                'inventory_status', 'total_cost_base', 'gross_margin_base',
                 'delivery_at', 'delivery_updated_by_membership_id', 'voided_by_membership_id',
                 'voided_at', 'void_reason', 'updated_at',
             ];
 
             $dirty = array_keys($sale->getDirty());
+            $inventoryFields = ['inventory_status', 'total_cost_base', 'gross_margin_base'];
+            $hasInventoryMutation = array_intersect($dirty, $inventoryFields) !== [];
             $isValidVoid = $sale->getRawOriginal('status') === SaleStatus::Confirmed->value
                 && $sale->status === SaleStatus::Voided
                 && $sale->order_status === SaleOrderStatus::Cancelled
@@ -69,12 +75,22 @@ class Sale extends Model
                 && trim((string) $sale->void_reason) !== '';
             $isMutableStateOnly = $sale->getRawOriginal('status') === SaleStatus::Confirmed->value
                 && $sale->status === SaleStatus::Confirmed
+                && ! $hasInventoryMutation
                 && $sale->order_status !== SaleOrderStatus::Cancelled
                 && ! in_array('voided_by_membership_id', $dirty, true)
                 && ! in_array('voided_at', $dirty, true)
                 && ! in_array('void_reason', $dirty, true);
+            $isValidInventoryCompletion = $sale->getRawOriginal('status') === SaleStatus::Confirmed->value
+                && $sale->status === SaleStatus::Confirmed
+                && $sale->getRawOriginal('inventory_status') === SaleInventoryStatus::PendingRegularization->value
+                && $sale->inventory_status === SaleInventoryStatus::Complete
+                && $sale->getRawOriginal('total_cost_base') === null
+                && $sale->getRawOriginal('gross_margin_base') === null
+                && $sale->total_cost_base !== null
+                && $sale->gross_margin_base !== null
+                && array_diff($dirty, [...$inventoryFields, 'updated_at']) === [];
 
-            if (array_diff($dirty, $allowed) !== [] || (! $isValidVoid && ! $isMutableStateOnly)) {
+            if (array_diff($dirty, $allowed) !== [] || (! $isValidVoid && ! $isMutableStateOnly && ! $isValidInventoryCompletion)) {
                 throw new DomainException('Confirmed sale records are immutable except for audited voiding.');
             }
 
@@ -153,6 +169,12 @@ class Sale extends Model
         return $this->hasMany(SaleStockMovement::class);
     }
 
+    /** @return HasMany<SaleInventoryPending, $this> */
+    public function inventoryPendings(): HasMany
+    {
+        return $this->hasMany(SaleInventoryPending::class);
+    }
+
     /** @return array<string, string> */
     protected function casts(): array
     {
@@ -161,6 +183,7 @@ class Sale extends Model
             'status' => SaleStatus::class,
             'order_status' => SaleOrderStatus::class,
             'payment_status' => PaymentStatus::class,
+            'inventory_status' => SaleInventoryStatus::class,
             'subtotal_base' => 'decimal:4',
             'extras_total_base' => 'decimal:4',
             'total_base' => 'decimal:4',

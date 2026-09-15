@@ -31,7 +31,7 @@ class ReverseStockMovement
             throw new DomainException('The movement must belong to the actor company.');
         }
 
-        if ($movement->type === StockMovementType::Sale) {
+        if (in_array($movement->type, [StockMovementType::Sale, StockMovementType::SaleRegularization], true)) {
             throw new DomainException('Las salidas por venta solo pueden revertirse anulando la venta.');
         }
 

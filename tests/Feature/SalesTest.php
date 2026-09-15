@@ -10,6 +10,7 @@ use App\Actions\Sales\ConfirmSale;
 use App\Actions\Sales\VoidSale;
 use App\Enums\CompanyModuleStatus;
 use App\Enums\ModuleCode;
+use App\Enums\SaleInventoryStatus;
 use App\Enums\SaleStatus;
 use App\Enums\SaleStockMovementKind;
 use App\Enums\StockMovementType;
@@ -22,7 +23,6 @@ use App\Models\PaymentMethod;
 use App\Models\Product;
 use App\Models\Sale;
 use App\Models\StockBalance;
-use App\Models\StockMovement;
 use App\Models\Unit;
 use App\Models\User;
 use App\Models\Warehouse;
@@ -159,7 +159,7 @@ test('confirming a bouquet sale consumes its active recipe and keeps historical 
         ->and($link->stockMovement->lines)->toHaveCount(4);
 });
 
-test('insufficient stock rejects the whole sale without partial records', function () {
+test('insufficient stock confirms the sale with a full pending regularization', function () {
     $context = salesContext(true);
     $rose = salesSupply($context, 'Rosa Roja', 'ROSA-LOW', '5', '5');
     $paper = salesSupply($context, 'Papel', 'PAP-SAFE', '10', '2');
@@ -168,16 +168,15 @@ test('insufficient stock rejects the whole sale without partial records', functi
         ['product' => $paper, 'quantity' => 1],
     ]);
     $cash = PaymentMethod::query()->withoutGlobalScope('company')->where('company_id', $context['company']->getKey())->where('code', 'cash')->firstOrFail();
-    $movementCount = StockMovement::query()->withoutGlobalScope('company')->count();
-
-    expect(fn () => confirmTestSale($context, [['product' => $bouquet, 'quantity' => 1]], [
+    $sale = confirmTestSale($context, [['product' => $bouquet, 'quantity' => 1]], [
         ['payment_method' => $cash, 'amount_base' => 80],
-    ]))->toThrow(DomainException::class, 'No hay suficientes Rosa Roja');
+    ]);
 
-    expect(Sale::query()->withoutGlobalScope('company')->count())->toBe(0)
-        ->and(StockMovement::query()->withoutGlobalScope('company')->count())->toBe($movementCount)
+    expect($sale->inventory_status)->toBe(SaleInventoryStatus::PendingRegularization)
+        ->and($sale->inventoryPendings)->toHaveCount(1)
+        ->and($sale->inventoryPendings->sole()->required_quantity)->toBe('6.000000')
         ->and(StockBalance::query()->where('product_id', $rose->getKey())->value('quantity'))->toBe('5.000000')
-        ->and(StockBalance::query()->where('product_id', $paper->getKey())->value('quantity'))->toBe('10.000000');
+        ->and(StockBalance::query()->where('product_id', $paper->getKey())->value('quantity'))->toBe('9.000000');
 });
 
 test('split payments may cover all or part of the sale total', function () {

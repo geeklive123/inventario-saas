@@ -35,6 +35,9 @@
                 <flux:sidebar.item icon="building-storefront" :href="route('inventory.stock')" :current="request()->routeIs('inventory.stock')" wire:navigate>Inventario</flux:sidebar.item>
                 <flux:sidebar.item icon="arrows-right-left" :href="route('inventory.movements')" :current="request()->routeIs('inventory.movements')" wire:navigate>Movimientos</flux:sidebar.item>
                 <flux:sidebar.item icon="trash" :href="route('inventory.waste')" :current="request()->routeIs('inventory.waste')" wire:navigate>Mermas</flux:sidebar.item>
+                @can('viewAny', App\Models\SaleInventoryPending::class)
+                    <flux:sidebar.item icon="exclamation-triangle" :href="route('inventory.regularizations')" :current="request()->routeIs('inventory.regularizations*')" wire:navigate>Pendientes de regularización</flux:sidebar.item>
+                @endcan
             </flux:sidebar.group>
         @endcan
         @can('viewAny', App\Models\Membership::class)
