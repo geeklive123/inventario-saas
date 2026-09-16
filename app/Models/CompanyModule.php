@@ -12,6 +12,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
  * @property CompanyModuleStatus $status
+ * @property array<string, mixed>|null $settings
  */
 #[Fillable([
     'company_id',
@@ -54,6 +55,11 @@ class CompanyModule extends Model
     public function isEnabled(): bool
     {
         return $this->status === CompanyModuleStatus::Enabled;
+    }
+
+    public function allowsBackdatedSales(): bool
+    {
+        return (bool) data_get($this->settings, 'allow_backdated_sales', false);
     }
 
     /** @return array<string, string> */

@@ -10,6 +10,7 @@ use App\Enums\SaleExtraType;
 use App\Enums\SaleOrderStatus;
 use App\Enums\SaleStatus;
 use App\Models\Branch;
+use App\Models\CompanyModule;
 use App\Models\PaymentMethod;
 use App\Models\Product;
 use App\Models\Sale;
@@ -18,7 +19,7 @@ use App\Models\Warehouse;
 use App\Support\Authorization\CompanyAccess;
 use App\Support\Decimal;
 use App\Support\Tenancy\CurrentCompany;
-use Carbon\Carbon;
+use Carbon\CarbonImmutable;
 use Flux\Flux;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Pagination\LengthAwarePaginator;
@@ -61,6 +62,10 @@ new #[Title('Ventas')] class extends Component
 
     public string $deliveryAt = '';
 
+    public string $saleDateMode = 'today';
+
+    public string $saleOccurredAt = '';
+
     public string $extraName = '';
 
     public string $extraPrice = '';
@@ -101,7 +106,12 @@ new #[Title('Ventas')] class extends Component
         $this->paymentLines = [];
         $this->extraLines = [];
         $this->orderStatus = SaleOrderStatus::Reserved->value;
-        $this->deliveryAt = now(app(CurrentCompany::class)->company()->timezone)->addDay()->setTime(9, 0)->format('Y-m-d\TH:i');
+        $companyTimezone = app(CurrentCompany::class)->company()->timezone;
+        $this->deliveryAt = now($companyTimezone)->addDay()->setTime(9, 0)->format('Y-m-d\TH:i');
+        $this->saleDateMode = 'today';
+        $this->saleOccurredAt = $this->backdatedSalesEnabled
+            ? now($companyTimezone)->format('Y-m-d\TH:i')
+            : '';
         $this->showSaleModal = true;
         Flux::modal('new-sale')->show();
     }
@@ -187,7 +197,17 @@ new #[Title('Ventas')] class extends Component
     public function confirmSale(): void
     {
         Gate::authorize('create', Sale::class);
-        $companyId = app(CurrentCompany::class)->id();
+        $currentCompany = app(CurrentCompany::class);
+        $company = $currentCompany->company();
+        $companyId = $company->getKey();
+
+        if (! $this->backdatedSalesEnabled
+            && ($this->saleDateMode !== 'today' || $this->saleOccurredAt !== '')) {
+            $this->addError('sale', 'La empresa no permite registrar ventas con una fecha anterior.');
+
+            return;
+        }
+
         $data = $this->validate([
             'customerName' => ['nullable', 'string', 'max:255'],
             'branchId' => ['required', Rule::exists('branches', 'id')->where('company_id', $companyId)],
@@ -214,6 +234,8 @@ new #[Title('Ventas')] class extends Component
             'extraLines.*.unit_price_base' => ['required', 'numeric', 'gte:0'],
             'orderStatus' => ['required', Rule::enum(SaleOrderStatus::class)],
             'deliveryAt' => ['nullable', 'date', Rule::requiredIf($this->orderStatus === SaleOrderStatus::Reserved->value)],
+            'saleDateMode' => ['required', Rule::in(['today', 'other'])],
+            'saleOccurredAt' => [Rule::requiredIf($this->backdatedSalesEnabled && $this->saleDateMode === 'other'), 'nullable', 'date'],
         ], messages: [
             'saleLines.*.product_id.required' => 'Selecciona un ramo.',
             'saleLines.*.quantity.gt' => 'La cantidad debe ser mayor que cero.',
@@ -231,6 +253,9 @@ new #[Title('Ventas')] class extends Component
         )->get()->keyBy('id');
         $methods = PaymentMethod::query()->whereIn('id', collect($data['paymentLines'])->pluck('payment_method_id'))->get()->keyBy('id');
         $extras = SaleExtra::query()->whereIn('id', collect($data['extraLines'])->pluck('extra_id'))->get()->keyBy('id');
+        $effectiveOccurredAt = $this->backdatedSalesEnabled && $data['saleDateMode'] === 'other'
+            ? CarbonImmutable::parse($data['saleOccurredAt'], $company->timezone)->utc()
+            : null;
 
         try {
             $sale = app(ConfirmSale::class)->handle(
@@ -252,7 +277,7 @@ new #[Title('Ventas')] class extends Component
                     'amount_base' => $payment['amount_base'],
                 ])->all(),
                 $data['customerName'],
-                null,
+                $effectiveOccurredAt,
                 collect($data['extraLines'])->map(fn (array $line): array => [
                     'extra' => $extras->get($line['extra_id']),
                     'quantity' => $line['quantity'],
@@ -260,7 +285,7 @@ new #[Title('Ventas')] class extends Component
                 ])->all(),
                 SaleOrderStatus::from($data['orderStatus']),
                 $data['deliveryAt']
-                    ? Carbon::parse($data['deliveryAt'], app(CurrentCompany::class)->company()->timezone)->utc()
+                    ? CarbonImmutable::parse($data['deliveryAt'], $company->timezone)->utc()
                     : null,
             );
         } catch (\DomainException $exception) {
@@ -469,22 +494,68 @@ new #[Title('Ventas')] class extends Component
     }
 
     #[Computed]
+    public function backdatedSalesEnabled(): bool
+    {
+        return CompanyModule::query()
+            ->where('company_id', app(CurrentCompany::class)->id())
+            ->whereHas('module', fn ($query) => $query->where('code', ModuleCode::Sales))
+            ->first()?->allowsBackdatedSales() ?? false;
+    }
+
+    #[Computed]
+    public function minimumBackdatedSaleAt(): string
+    {
+        return CarbonImmutable::now(app(CurrentCompany::class)->company()->timezone)
+            ->startOfDay()->subDays(2)->format('Y-m-d\TH:i');
+    }
+
+    #[Computed]
+    public function maximumBackdatedSaleAt(): string
+    {
+        return CarbonImmutable::now(app(CurrentCompany::class)->company()->timezone)->format('Y-m-d\TH:i');
+    }
+
+    #[Computed]
     public function sales(): LengthAwarePaginator
     {
-        return Sale::query()
+        $query = Sale::query()
             ->with(['items:id,sale_id,product_name,quantity', 'payments:id,sale_id,payment_method_name', 'confirmedBy.user:id,name'])
             ->when($this->search, fn ($query) => $query->where(function ($search) {
                 $search->where('number', 'like', '%'.$this->search.'%')
                     ->orWhere('customer_name', 'like', '%'.$this->search.'%')
                     ->orWhereHas('items', fn ($items) => $items->where('product_name', 'like', '%'.$this->search.'%'));
-            }))
-            ->when($this->dateFilter, fn ($query) => $query->whereDate('occurred_at', $this->dateFilter))
+            }));
+
+        if ($this->dateFilter !== '') {
+            $range = $this->dateFilterRange();
+            $range === null
+                ? $query->whereKey(0)
+                : $query->whereBetween('occurred_at', $range);
+        }
+
+        return $query
             ->when($this->statusFilter, fn ($query) => $query->where('status', $this->statusFilter))
             ->when($this->paymentMethodFilter, fn ($query) => $query->whereHas(
                 'payments', fn ($payments) => $payments->where('payment_method_id', $this->paymentMethodFilter),
             ))
             ->latest('occurred_at')
             ->paginate(15);
+    }
+
+    /** @return array{CarbonImmutable, CarbonImmutable}|null */
+    private function dateFilterRange(): ?array
+    {
+        try {
+            $from = CarbonImmutable::createFromFormat(
+                '!Y-m-d',
+                $this->dateFilter,
+                app(CurrentCompany::class)->company()->timezone,
+            );
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return [$from->startOfDay()->utc(), $from->endOfDay()->utc()];
     }
 
     public function openExtraManager(): void
@@ -578,6 +649,7 @@ new #[Title('Ventas')] class extends Component
                 <div><flux:heading size="lg">Nueva venta</flux:heading><flux:text>Selecciona los ramos, confirma el pago y el sistema descontará sus insumos.</flux:text></div>
                 @error('sale')<flux:callout variant="danger" icon="x-circle" heading="No se pudo confirmar la venta"><div class="whitespace-pre-line">{{ $message }}</div></flux:callout>@enderror
                 <div class="grid gap-4 md:grid-cols-4"><flux:input wire:model="customerName" label="Cliente (opcional)" placeholder="Consumidor final" /><flux:select wire:model.live="branchId" label="Sucursal" required>@foreach($this->branches as $branch)<flux:select.option :value="$branch->id">{{ $branch->name }}</flux:select.option>@endforeach</flux:select><flux:select wire:model="warehouseId" label="Almacén" required>@foreach($this->warehouses as $warehouse)<flux:select.option :value="$warehouse->id">{{ $warehouse->name }}</flux:select.option>@endforeach</flux:select><flux:select wire:model.live="orderStatus" label="Estado del pedido" required>@foreach(SaleOrderStatus::cases() as $state)@if($state !== SaleOrderStatus::Cancelled)<flux:select.option :value="$state->value">{{ $state->label() }}</flux:select.option>@endif @endforeach</flux:select></div>
+                @if($this->backdatedSalesEnabled)<flux:card class="space-y-4 bg-zinc-50 dark:bg-zinc-800/60"><div><flux:heading size="sm">Fecha de la venta</flux:heading><flux:text size="sm">Puedes registrar ventas de hoy o hasta 2 días calendario atrás.</flux:text></div><flux:radio.group wire:model.live="saleDateMode"><flux:radio value="today" label="Hoy" /><flux:radio value="other" label="Otra fecha" /></flux:radio.group>@if($saleDateMode === 'other')<flux:input wire:model="saleOccurredAt" type="datetime-local" label="Fecha y hora de la venta" :min="$this->minimumBackdatedSaleAt" :max="$this->maximumBackdatedSaleAt" required /><flux:callout icon="information-circle" heading="Esta venta se registrará con una fecha anterior."><div>Los pagos iniciales usarán esta misma fecha y hora.</div></flux:callout>@endif</flux:card>@endif
                 @if($orderStatus === SaleOrderStatus::Reserved->value)<flux:input wire:model="deliveryAt" type="datetime-local" label="Fecha y hora de entrega" description="Obligatoria para pedidos reservados." required />@endif
 
                 <div class="space-y-3"><div class="flex items-center justify-between"><flux:heading size="sm">Ramos</flux:heading><flux:button type="button" size="sm" icon="plus" wire:click="addSaleLine">Agregar otro ramo</flux:button></div>

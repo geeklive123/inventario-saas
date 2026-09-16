@@ -40,6 +40,12 @@ class CompanyPolicy
         return $this->access->allows($user, $company, 'core.companies.update');
     }
 
+    public function manageSalesSettings(User $user, Company $company): bool
+    {
+        return $this->access->isOwnerOrAdministrator($user, $company)
+            && $this->access->allows($user, $company, 'core.modules.manage');
+    }
+
     /**
      * Determine whether the user can delete the model.
      */

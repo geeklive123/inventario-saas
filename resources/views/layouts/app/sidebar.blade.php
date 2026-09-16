@@ -43,10 +43,11 @@
         @can('viewAny', App\Models\Membership::class)
             <flux:sidebar.group heading="Equipo" class="grid"><flux:sidebar.item icon="users" :href="route('users.index')" :current="request()->routeIs('users.index')" wire:navigate>Usuarios</flux:sidebar.item></flux:sidebar.group>
         @endcan
-        @if(auth()->user()->can('viewAny', App\Models\Branch::class) || auth()->user()->can('viewAny', App\Models\Warehouse::class))
+        @if(auth()->user()->can('manageSalesSettings', app(App\Support\Tenancy\CurrentCompany::class)->company()) || auth()->user()->can('viewAny', App\Models\Branch::class) || auth()->user()->can('viewAny', App\Models\Warehouse::class))
             <flux:sidebar.group heading="Configuración" class="grid">
                 <flux:sidebar.item icon="tag" :href="route('catalog.categories')" :current="request()->routeIs('catalog.categories')" wire:navigate>Categorías</flux:sidebar.item>
                 <flux:sidebar.item icon="scale" :href="route('catalog.units')" :current="request()->routeIs('catalog.units')" wire:navigate>Unidades</flux:sidebar.item>
+                @can('manageSalesSettings', app(App\Support\Tenancy\CurrentCompany::class)->company())<flux:sidebar.item icon="shopping-bag" :href="route('configuration.sales')" :current="request()->routeIs('configuration.sales')" wire:navigate>Ventas</flux:sidebar.item>@endcan
                 @can('viewAny', App\Models\Branch::class)<flux:sidebar.item icon="building-office" :href="route('configuration.branches')" :current="request()->routeIs('configuration.branches')" wire:navigate>Sucursales</flux:sidebar.item>@endcan
                 @can('viewAny', App\Models\Warehouse::class)<flux:sidebar.item icon="building-storefront" :href="route('configuration.warehouses')" :current="request()->routeIs('configuration.warehouses')" wire:navigate>Almacenes</flux:sidebar.item>@endcan
             </flux:sidebar.group>

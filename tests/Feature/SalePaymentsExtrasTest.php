@@ -2,6 +2,7 @@
 
 use App\Actions\Catalog\CreateProductRecipe;
 use App\Actions\Companies\CreateCompany;
+use App\Actions\Companies\UpdateSalesSettings;
 use App\Actions\Expenses\CreateExpense;
 use App\Actions\Inventory\RegisterOpeningStock;
 use App\Actions\Modules\SetModuleStatus;
@@ -194,6 +195,7 @@ test('an expense without invoice does not require an invoice number', function (
 test('dashboard collections use the payment date instead of the sale date', function () {
     CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-08-17 12:00:00', 'America/La_Paz'));
     $context = paymentFeatureContext();
+    app(UpdateSalesSettings::class)->handle($context['membership'], true);
     $sale = paymentFeatureSale($context, [], [], CarbonImmutable::parse('2026-08-16 10:00:00', 'America/La_Paz')->utc());
     app(RegisterSalePayment::class)->handle($context['membership'], $sale, $context['cash'], 30, now());
 

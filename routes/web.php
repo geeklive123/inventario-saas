@@ -60,6 +60,7 @@ Route::middleware(['auth', 'password.changed'])->group(function () {
             ->name('users.index');
 
         Route::prefix('configuracion')->name('configuration.')->group(function () {
+            Route::livewire('ventas', 'pages::settings.sales')->name('sales');
             Route::livewire('sucursales', 'pages::settings.branches')
                 ->middleware('permission:core.branches.view')->name('branches');
             Route::livewire('almacenes', 'pages::settings.warehouses')

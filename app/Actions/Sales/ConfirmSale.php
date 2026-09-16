@@ -15,6 +15,7 @@ use App\Enums\SaleStockMovementKind;
 use App\Enums\StockMovementType;
 use App\Models\Branch;
 use App\Models\Company;
+use App\Models\CompanyModule;
 use App\Models\Membership;
 use App\Models\PaymentMethod;
 use App\Models\Product;
@@ -32,6 +33,7 @@ use App\Models\Warehouse;
 use App\Services\Inventory\InventoryService;
 use App\Support\Authorization\CompanyAccess;
 use App\Support\Decimal;
+use Carbon\CarbonImmutable;
 use Carbon\CarbonInterface;
 use DomainException;
 use Illuminate\Support\Arr;
@@ -99,6 +101,7 @@ class ConfirmSale
             }
 
             $this->authorize($lockedActor);
+            $effectiveOccurredAt = $this->effectiveOccurredAt($company, $occurredAt);
             $preparedItems = $this->prepareItems($company, $warehouse, $lines);
             $subtotal = $this->sumMoney($preparedItems->pluck('subtotal_base'));
             $preparedExtras = $this->prepareExtras($lockedActor, $company, $extras);
@@ -146,7 +149,7 @@ class ConfirmSale
                 'total_cost_base' => $totalCost,
                 'gross_margin_base' => $totalCost === null ? null : $this->money(bcsub($total, $totalCost, 8)),
                 'confirmed_by_membership_id' => $lockedActor->getKey(),
-                'occurred_at' => $occurredAt ?? now(),
+                'occurred_at' => $effectiveOccurredAt,
                 'delivery_at' => $deliveryAt,
                 'delivery_updated_by_membership_id' => $deliveryAt === null ? null : $lockedActor->getKey(),
             ]);
@@ -197,7 +200,7 @@ class ConfirmSale
                     'company_id' => $company->getKey(),
                     'sale_id' => $sale->getKey(),
                     'received_by_membership_id' => $lockedActor->getKey(),
-                    'occurred_at' => $occurredAt ?? now(),
+                    'occurred_at' => $effectiveOccurredAt,
                     ...$payment,
                 ]);
             }
@@ -210,7 +213,7 @@ class ConfirmSale
                     StockMovementType::Sale,
                     $movementLines,
                     "Venta {$number}",
-                    $occurredAt,
+                    $effectiveOccurredAt,
                 );
 
                 SaleStockMovement::query()->create([
@@ -236,6 +239,42 @@ class ConfirmSale
             || ! $this->access->moduleEnabled($actor->company, ModuleCode::Inventory)) {
             throw new DomainException('La membership responsable no puede registrar ventas.');
         }
+    }
+
+    private function effectiveOccurredAt(Company $company, ?CarbonInterface $occurredAt): CarbonImmutable
+    {
+        $salesModule = CompanyModule::query()
+            ->withoutGlobalScope('company')
+            ->where('company_id', $company->getKey())
+            ->whereHas('module', fn ($query) => $query->where('code', ModuleCode::Sales))
+            ->lockForUpdate()
+            ->firstOrFail();
+        $now = CarbonImmutable::now($company->timezone);
+
+        if (! $salesModule->allowsBackdatedSales()) {
+            if ($occurredAt !== null) {
+                throw new DomainException('La empresa no permite registrar ventas con una fecha anterior.');
+            }
+
+            return $now->utc();
+        }
+
+        if ($occurredAt === null) {
+            return $now->utc();
+        }
+
+        $effective = CarbonImmutable::instance($occurredAt)->setTimezone($company->timezone);
+        $minimum = $now->startOfDay()->subDays(2);
+
+        if ($effective->lessThan($minimum)) {
+            throw new DomainException('La fecha de la venta no puede ser anterior a 2 días calendario.');
+        }
+
+        if ($effective->greaterThan($now)) {
+            throw new DomainException('La fecha de la venta no puede estar en el futuro.');
+        }
+
+        return $effective->utc();
     }
 
     private function validateLocation(Membership $actor, Branch $branch, Warehouse $warehouse): void
