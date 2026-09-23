@@ -25,6 +25,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 ])]
 class CompanyModule extends Model
 {
+    public const BACKDATED_SALES_MAXIMUM_DAYS = 30;
+
     use BelongsToCompany;
 
     /** @use HasFactory<CompanyModuleFactory> */

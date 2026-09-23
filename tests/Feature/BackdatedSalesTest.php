@@ -150,22 +150,40 @@ test('C configuration on permits a sale from yesterday', function () {
     expect(createBackdatedTestSale($context, $occurredAt)->occurred_at->equalTo($occurredAt))->toBeTrue();
 });
 
-test('D configuration on permits the beginning of the second previous calendar day', function () {
+test('D configuration on permits the beginning of the thirtieth previous calendar day', function () {
     $context = backdatedSalesContext();
     enableBackdatedTestSales($context);
-    $occurredAt = CarbonImmutable::parse('2026-09-14 00:00:00', 'America/La_Paz')->utc();
+    $occurredAt = CarbonImmutable::now('America/La_Paz')->startOfDay()->subDays(30)->utc();
 
     expect(createBackdatedTestSale($context, $occurredAt)->occurred_at->equalTo($occurredAt))->toBeTrue();
 });
 
-test('E a sale older than two local calendar days is rejected', function () {
+test('E a sale older than thirty local calendar days is rejected', function () {
     $context = backdatedSalesContext();
     enableBackdatedTestSales($context);
 
     expect(fn () => createBackdatedTestSale(
         $context,
-        CarbonImmutable::parse('2026-09-13 23:59:59', 'America/La_Paz')->utc(),
-    ))->toThrow(DomainException::class, 'anterior a 2 días');
+        CarbonImmutable::now('America/La_Paz')->startOfDay()->subDays(30)->subSecond()->utc(),
+    ))->toThrow(DomainException::class, 'anterior a 30 días');
+});
+
+test('sales from September 15 and 20 can be registered on September 23', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-09-23 09:00:00', 'America/La_Paz'));
+    $context = backdatedSalesContext();
+    enableBackdatedTestSales($context);
+
+    $saleFromFifteenth = createBackdatedTestSale(
+        $context,
+        CarbonImmutable::parse('2026-09-15 16:34:00', 'America/La_Paz')->utc(),
+    );
+    $saleFromTwentieth = createBackdatedTestSale(
+        $context,
+        CarbonImmutable::parse('2026-09-20 15:33:00', 'America/La_Paz')->utc(),
+    );
+
+    expect($saleFromFifteenth->occurred_at->timezone('America/La_Paz')->format('Y-m-d H:i'))->toBe('2026-09-15 16:34')
+        ->and($saleFromTwentieth->occurred_at->timezone('America/La_Paz')->format('Y-m-d H:i'))->toBe('2026-09-20 15:33');
 });
 
 test('F a future sale is rejected', function () {
@@ -348,7 +366,7 @@ test('Q disabling the setting preserves history and blocks new explicit historic
         ->withSession(['current_membership_id' => $context['membership']->getKey()])
         ->get(route('sales.index'))
         ->assertSuccessful()
-        ->assertDontSee('Puedes registrar ventas de hoy o hasta 2 días calendario atrás.');
+        ->assertDontSee('Puedes registrar ventas de hoy o hasta 30 días calendario atrás.');
 });
 
 test('the complete local workflow lets a seller backdate only while the owner setting is enabled', function () {
@@ -398,7 +416,7 @@ test('the complete local workflow lets a seller backdate only while the owner se
 
     Livewire::actingAs($sellerUser)
         ->test('pages::sales.index')
-        ->assertDontSee('Puedes registrar ventas de hoy o hasta 2 días calendario atrás.')
+        ->assertDontSee('Puedes registrar ventas de hoy o hasta 30 días calendario atrás.')
         ->call('openSale')
         ->set('branchId', $context['branch']->getKey())
         ->set('warehouseId', $context['warehouse']->getKey())

@@ -45,7 +45,7 @@ new #[Title('Configuración de ventas')] class extends Component
         <flux:card class="space-y-5">
             <div>
                 <flux:heading size="lg">Ventas atrasadas</flux:heading>
-                <flux:text class="mt-1">Permite registrar ventas realizadas hoy o hasta 2 días calendario atrás.</flux:text>
+                <flux:text class="mt-1">Permite registrar ventas realizadas hoy o hasta {{ CompanyModule::BACKDATED_SALES_MAXIMUM_DAYS }} días calendario atrás.</flux:text>
             </div>
             <flux:switch wire:model="allowBackdatedSales" label="{{ $allowBackdatedSales ? 'Activado' : 'Desactivado' }}" />
             <div class="flex justify-end">

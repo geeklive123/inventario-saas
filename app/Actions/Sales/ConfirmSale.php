@@ -264,10 +264,10 @@ class ConfirmSale
         }
 
         $effective = CarbonImmutable::instance($occurredAt)->setTimezone($company->timezone);
-        $minimum = $now->startOfDay()->subDays(2);
+        $minimum = $now->startOfDay()->subDays(CompanyModule::BACKDATED_SALES_MAXIMUM_DAYS);
 
         if ($effective->lessThan($minimum)) {
-            throw new DomainException('La fecha de la venta no puede ser anterior a 2 días calendario.');
+            throw new DomainException('La fecha de la venta no puede ser anterior a '.CompanyModule::BACKDATED_SALES_MAXIMUM_DAYS.' días calendario.');
         }
 
         if ($effective->greaterThan($now)) {
