@@ -8,6 +8,7 @@ use App\Models\StockMovement;
 use App\Models\Unit;
 use App\Models\Warehouse;
 use App\Services\Dashboard\BusinessDashboard;
+use App\Services\Sales\UpcomingDeliveries;
 use App\Support\Authorization\CompanyAccess;
 use App\Support\Tenancy\CurrentCompany;
 use Illuminate\Database\Eloquent\Collection;
@@ -90,6 +91,13 @@ new #[Title('Dashboard')] class extends Component
         );
     }
 
+    /** @return list<array<string, mixed>> */
+    #[Computed]
+    public function upcomingDeliveries(): array
+    {
+        return app(UpcomingDeliveries::class)->forMembership(app(CurrentCompany::class)->membership());
+    }
+
     #[Computed]
     public function capabilities(): array
     {
@@ -103,6 +111,7 @@ new #[Title('Dashboard')] class extends Component
             'opening_stock' => $access->allowsCurrent($user, 'inventory.opening'),
             'adjust_stock' => $access->allowsCurrent($user, 'inventory.adjust'),
             'create_sale' => $access->allowsCurrent($user, 'sales.create'),
+            'view_sales' => $access->allowsCurrent($user, 'sales.view', mutation: false),
             'create_expense' => $access->allowsCurrent($user, 'finance.expenses.create'),
             'register_waste' => $access->allowsCurrent($user, 'inventory.waste'),
         ];
@@ -152,6 +161,36 @@ new #[Title('Dashboard')] class extends Component
 
     @if(! $this->business['visibility']['canViewIncome'])
         <flux:callout icon="user" heading="Tu actividad">Ves tus ventas y ramos registrados. Los importes, costos y resultados requieren acceso financiero.</flux:callout>
+    @endif
+    @if($this->capabilities['view_sales'])
+        <section wire:poll.60s class="space-y-3">
+            @if($this->upcomingDeliveries !== [])
+                <flux:callout color="amber" icon="clock" heading="Entregas próximas y pendientes">
+                    Revisa los pedidos que vencieron o deben entregarse durante la próxima hora.
+                </flux:callout>
+                <div class="grid gap-4 lg:grid-cols-2">
+                    @foreach($this->upcomingDeliveries as $group)
+                        <flux:card wire:key="delivery-group-{{ $group['key'] }}" class="space-y-4 {{ $group['overdue'] ? 'ring-2 ring-red-300 dark:ring-red-800' : 'ring-1 ring-amber-200 dark:ring-amber-900' }}">
+                            <div class="flex flex-wrap items-start justify-between gap-3">
+                                <div>
+                                    <flux:heading size="lg">{{ $group['delivery_at']->format('d/m/Y H:i') }}</flux:heading>
+                                    <flux:text>{{ $group['orders_count'] }} pedido(s) · {{ Number::format((float) $group['bouquets_quantity'], maxPrecision: 6, locale: 'es') }} ramo(s) en total</flux:text>
+                                </div>
+                                <flux:badge :color="$group['overdue'] ? 'red' : 'amber'">{{ $group['overdue'] ? 'Entrega vencida' : 'Próxima entrega' }}</flux:badge>
+                            </div>
+                            <div class="divide-y divide-zinc-200 dark:divide-zinc-700">
+                                @foreach($group['orders'] as $order)
+                                    <a wire:key="delivery-order-{{ $order['sale_id'] }}" href="{{ route('sales.show', ['saleId' => $order['sale_id']]) }}" wire:navigate class="flex items-center justify-between gap-4 py-3 first:pt-0 last:pb-0">
+                                        <span><strong>{{ $order['number'] }}</strong><flux:text size="sm">{{ $order['customer'] }} · {{ $order['status'] }}</flux:text></span>
+                                        <span class="text-sm font-semibold">{{ Number::format((float) $order['bouquets_quantity'], maxPrecision: 6, locale: 'es') }} ramo(s)</span>
+                                    </a>
+                                @endforeach
+                            </div>
+                        </flux:card>
+                    @endforeach
+                </div>
+            @endif
+        </section>
     @endif
     @if($this->business['stock_alerts'] > 0)
         <flux:callout color="amber" icon="exclamation-triangle" heading="Hay {{ $this->business['stock_alerts'] }} insumo(s) sin existencia">Revisa el almacén seleccionado antes de registrar nuevas ventas.</flux:callout>

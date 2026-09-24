@@ -1,8 +1,8 @@
 <?php
 
 use App\Actions\Sales\ConfirmSale;
-use App\Actions\Sales\DeactivateSaleExtra;
 use App\Actions\Sales\SaveSaleExtra;
+use App\Actions\Sales\SetSaleExtraStatus;
 use App\Enums\InventoryBehavior;
 use App\Enums\ModuleCode;
 use App\Enums\ProductItemType;
@@ -388,6 +388,12 @@ new #[Title('Ventas')] class extends Component
         return SaleExtra::query()->where('is_active', true)->orderBy('name')->get();
     }
 
+    #[Computed]
+    public function managedExtras(): Collection
+    {
+        return SaleExtra::query()->orderByDesc('is_active')->orderBy('name')->get();
+    }
+
     /** @return array<int, array{name: string, quantity: string, unit_price_base: string, subtotal_base: string}> */
     #[Computed]
     public function extraSummaryLines(): array
@@ -588,17 +594,20 @@ new #[Title('Ventas')] class extends Component
         app(SaveSaleExtra::class)->handle(app(CurrentCompany::class)->membership(), $data['extraName'], $data['extraPrice'], SaleExtraType::from($data['extraType']), $extra);
         $this->reset(['extraName', 'extraPrice', 'editingExtraId']);
         $this->extraType = SaleExtraType::Service->value;
-        unset($this->extras);
+        unset($this->extras, $this->managedExtras);
         Flux::toast(variant: 'success', text: $extra ? 'Extra actualizado.' : 'Extra creado.');
     }
 
-    public function deactivateExtra(int $extraId): void
+    public function setExtraStatus(int $extraId, bool $isActive): void
     {
         $extra = SaleExtra::query()->findOrFail($extraId);
-        Gate::authorize('deactivate', $extra);
-        app(DeactivateSaleExtra::class)->handle(app(CurrentCompany::class)->membership(), $extra);
-        unset($this->extras);
-        Flux::toast(variant: 'success', text: 'Extra desactivado. El historial no cambió.');
+        Gate::authorize($isActive ? 'update' : 'deactivate', $extra);
+        app(SetSaleExtraStatus::class)->handle(app(CurrentCompany::class)->membership(), $extra, $isActive);
+        unset($this->extras, $this->managedExtras);
+        Flux::toast(
+            variant: 'success',
+            text: $isActive ? 'Extra activado.' : 'Extra desactivado. El historial no cambió.',
+        );
     }
 
     private function selectDefaultWarehouse(): void
@@ -668,5 +677,5 @@ new #[Title('Ventas')] class extends Component
         </flux:modal>
     @endif
 
-    @if ($this->canManageExtras)<flux:modal name="extra-manager" class="max-w-2xl"><div class="space-y-5"><div><flux:heading size="lg">Extras de venta</flux:heading><flux:text>Configura servicios y productos adicionales. Por ahora los extras tipo producto no descuentan inventario.</flux:text></div><div class="max-h-64 space-y-2 overflow-y-auto">@forelse($this->extras as $extra)<div class="flex items-center justify-between rounded-lg border border-zinc-200 p-3 dark:border-zinc-700"><div><strong>{{ $extra->name }}</strong><flux:text size="sm">{{ $extra->type->label() }} · {{ $currency->symbol }} {{ $this->formatMoney($extra->default_price_base) }}</flux:text></div><div class="flex gap-1"><flux:button size="sm" variant="ghost" wire:click="editExtra({{ $extra->id }})">Editar</flux:button><flux:button size="sm" variant="ghost" wire:click="deactivateExtra({{ $extra->id }})" wire:confirm="¿Desactivar este extra?">Desactivar</flux:button></div></div>@empty<flux:text>No hay extras configurados.</flux:text>@endforelse</div><form wire:submit="saveExtra" class="grid items-end gap-3 md:grid-cols-[2fr_1fr_1fr_auto]"><flux:input wire:model="extraName" label="Nombre" required /><flux:input wire:model="extraPrice" type="number" min="0" step="0.0001" label="Precio" required /><flux:select wire:model="extraType" label="Tipo" required>@foreach(SaleExtraType::cases() as $type)<flux:select.option :value="$type->value">{{ $type->label() }}</flux:select.option>@endforeach</flux:select><flux:button type="submit" variant="primary">{{ $editingExtraId ? 'Guardar' : 'Agregar' }}</flux:button></form></div></flux:modal>@endif
+    @if ($this->canManageExtras)<flux:modal name="extra-manager" class="max-w-2xl"><div class="space-y-5"><div><flux:heading size="lg">Extras de venta</flux:heading><flux:text>Configura servicios y productos adicionales. Por ahora los extras tipo producto no descuentan inventario.</flux:text></div><div class="max-h-64 space-y-2 overflow-y-auto">@forelse($this->managedExtras as $extra)<div class="flex items-center justify-between gap-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-700"><div><div class="flex flex-wrap items-center gap-2"><strong>{{ $extra->name }}</strong><flux:badge :color="$extra->is_active ? 'green' : 'zinc'">{{ $extra->is_active ? 'Activo' : 'Inactivo' }}</flux:badge></div><flux:text size="sm">{{ $extra->type->label() }} · {{ $currency->symbol }} {{ $this->formatMoney($extra->default_price_base) }}</flux:text></div><div class="flex gap-1"><flux:button size="sm" variant="ghost" wire:click="editExtra({{ $extra->id }})">Editar</flux:button><flux:button size="sm" variant="ghost" wire:click="setExtraStatus({{ $extra->id }}, {{ $extra->is_active ? 'false' : 'true' }})" wire:confirm="¿{{ $extra->is_active ? 'Desactivar' : 'Activar' }} este extra?">{{ $extra->is_active ? 'Desactivar' : 'Activar' }}</flux:button></div></div>@empty<flux:text>No hay extras configurados.</flux:text>@endforelse</div><form wire:submit="saveExtra" class="grid items-end gap-3 md:grid-cols-[2fr_1fr_1fr_auto]"><flux:input wire:model="extraName" label="Nombre" required /><flux:input wire:model="extraPrice" type="number" min="0" step="0.0001" label="Precio predeterminado" required /><flux:select wire:model="extraType" label="Tipo" required>@foreach(SaleExtraType::cases() as $type)<flux:select.option :value="$type->value">{{ $type->label() }}</flux:select.option>@endforeach</flux:select><flux:button type="submit" variant="primary">{{ $editingExtraId ? 'Guardar' : 'Agregar' }}</flux:button></form></div></flux:modal>@endif
 </div>

@@ -225,7 +225,7 @@ new #[Title('Inventario')] class extends Component
 
         $actor = app(CurrentCompany::class)->membership();
         $occurredAt = $data['operation'] === 'inbound'
-            ? CarbonImmutable::createFromFormat('Y-m-d', $data['occurredAt'], app(CurrentCompany::class)->company()->timezone)->startOfDay()
+            ? CarbonImmutable::createFromFormat('!Y-m-d', $data['occurredAt'], app(CurrentCompany::class)->company()->timezone)->utc()
             : null;
 
         try {
@@ -562,7 +562,14 @@ new #[Title('Inventario')] class extends Component
                 @endif
 
                 @if ($operation === 'inbound')
-                    <flux:input wire:model="occurredAt" type="date" label="Fecha" required />
+                    <flux:input
+                        wire:model="occurredAt"
+                        type="date"
+                        label="Fecha efectiva"
+                        description="Fecha a la que corresponde este ingreso de inventario."
+                        :max="$this->todayForCompany()"
+                        required
+                    />
                 @endif
 
                 <flux:input

@@ -122,6 +122,7 @@ new #[Title('Reportes')] class extends Component
 
     @php($report = $this->report)
     @php($capabilities = $report['capabilities'])
+    @php($companyTimezone = app(CurrentCompany::class)->company()->timezone)
 
     <section class="space-y-4">
         <div>
@@ -148,12 +149,15 @@ new #[Title('Reportes')] class extends Component
     @if ($report['sales'])
         <section class="space-y-4">
             <div><flux:heading size="lg">Ventas</flux:heading><flux:text>Actividad comercial confirmada y ventas anuladas por separado.</flux:text></div>
-            <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+            <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                 <flux:card><flux:text>Número de ventas</flux:text><div class="mt-2 text-xl font-semibold">{{ $report['sales']['count'] }}</div></flux:card>
                 <flux:card><flux:text>Ventas anuladas</flux:text><div class="mt-2 text-xl font-semibold">{{ $report['sales']['voided_count'] }}</div></flux:card>
                 @if ($capabilities['financial'])
                     <flux:card><flux:text>Monto vendido</flux:text><div class="mt-2 text-xl font-semibold">{{ $this->money($report['sales']['total_sold_base']) }}</div></flux:card>
-                    <flux:card><flux:text>Monto cobrado</flux:text><div class="mt-2 text-xl font-semibold">{{ $this->money($report['sales']['collected_base']) }}</div></flux:card>
+                    <flux:card><flux:text>Cobros en efectivo</flux:text><div class="mt-2 text-xl font-semibold text-green-700 dark:text-green-400">{{ $this->money($report['sales']['cash_collected_base']) }}</div><flux:text size="sm">Pagos recibidos mediante el método Efectivo.</flux:text></flux:card>
+                    <flux:card><flux:text>Cobros por QR</flux:text><div class="mt-2 text-xl font-semibold text-blue-700 dark:text-blue-400">{{ $this->money($report['sales']['qr_collected_base']) }}</div><flux:text size="sm">Pagos recibidos mediante QR.</flux:text></flux:card>
+                    @if(bccomp($report['sales']['other_collected_base'], '0', 4) === 1)<flux:card><flux:text>Otros métodos</flux:text><div class="mt-2 text-xl font-semibold">{{ $this->money($report['sales']['other_collected_base']) }}</div><flux:text size="sm">Transferencias u otras formas de pago.</flux:text></flux:card>@endif
+                    <flux:card class="ring-1 ring-green-200 dark:ring-green-900"><flux:text>Total cobrado</flux:text><div class="mt-2 text-xl font-semibold">{{ $this->money($report['sales']['collected_base']) }}</div><flux:text size="sm">Suma de todos los pagos reales del período.</flux:text></flux:card>
                     <flux:card><flux:text>Saldo pendiente</flux:text><div class="mt-2 text-xl font-semibold">{{ $this->money($report['sales']['pending_base']) }}</div></flux:card>
                     <flux:card><flux:text>Ticket promedio</flux:text><div class="mt-2 text-xl font-semibold">{{ $report['sales']['average_ticket_base'] === null ? '—' : $this->money($report['sales']['average_ticket_base']) }}</div></flux:card>
                 @endif
@@ -164,6 +168,24 @@ new #[Title('Reportes')] class extends Component
                 @endif
                 <flux:card><flux:heading>Ventas por responsable</flux:heading><div class="mt-4 divide-y divide-zinc-200 dark:divide-zinc-700">@forelse($report['sales']['by_responsible'] as $responsible)<div class="flex justify-between gap-4 py-3"><span>{{ $responsible['name'] }}</span><strong>{{ $responsible['count'] }} ventas</strong></div>@empty<flux:text class="py-3">Sin ventas en el período.</flux:text>@endforelse</div></flux:card>
             </div>
+        </section>
+    @endif
+
+    @if ($report['orders'] !== null)
+        <section class="space-y-4">
+            <div><flux:heading size="lg">Pedidos / Reservas</flux:heading><flux:text>Fechas y estado actual de los pedidos registrados en el período.</flux:text></div>
+            <flux:card class="overflow-hidden p-0!">
+                <div class="overflow-x-auto"><flux:table><flux:table.columns><flux:table.column>Nro. venta</flux:table.column><flux:table.column>Cliente</flux:table.column><flux:table.column>Fecha de reserva / venta</flux:table.column><flux:table.column>Fecha de entrega</flux:table.column><flux:table.column>Estado del pedido</flux:table.column>@if($capabilities['financial'])<flux:table.column align="end">Total</flux:table.column>@endif<flux:table.column>Estado de pago</flux:table.column></flux:table.columns><flux:table.rows>@forelse($report['orders'] as $order)<flux:table.row :key="$order['number']"><flux:table.cell variant="strong">{{ $order['number'] }}</flux:table.cell><flux:table.cell>{{ $order['customer'] }}</flux:table.cell><flux:table.cell>{{ $order['occurred_at']->timezone($companyTimezone)->format('d/m/Y H:i') }}</flux:table.cell><flux:table.cell>{{ $order['delivery_at']?->timezone($companyTimezone)->format('d/m/Y H:i') ?? 'No indicada' }}</flux:table.cell><flux:table.cell>{{ $order['order_status'] }}</flux:table.cell>@if($capabilities['financial'])<flux:table.cell align="end">{{ $this->money($order['total_base']) }}</flux:table.cell>@endif<flux:table.cell>{{ $order['payment_status'] }}</flux:table.cell></flux:table.row>@empty<flux:table.row><flux:table.cell :colspan="$capabilities['financial'] ? 7 : 6"><div class="py-8 text-center"><flux:text>No hay pedidos en este período.</flux:text></div></flux:table.cell></flux:table.row>@endforelse</flux:table.rows></flux:table></div>
+            </flux:card>
+        </section>
+    @endif
+
+    @if ($report['extras'] !== null)
+        <section class="space-y-4">
+            <div><flux:heading size="lg">Extras vendidos</flux:heading><flux:text>Resumen basado en el nombre y precio guardados en cada venta histórica.</flux:text></div>
+            <flux:card class="overflow-hidden p-0!">
+                <div class="overflow-x-auto"><flux:table><flux:table.columns><flux:table.column>Extra</flux:table.column><flux:table.column align="end">Cantidad</flux:table.column>@if($capabilities['financial'])<flux:table.column align="end">Importe total</flux:table.column>@endif</flux:table.columns><flux:table.rows>@forelse($report['extras'] as $extra)<flux:table.row :key="$extra['name']"><flux:table.cell variant="strong">{{ $extra['name'] }}</flux:table.cell><flux:table.cell align="end">{{ $this->quantity($extra['quantity']) }}</flux:table.cell>@if($capabilities['financial'])<flux:table.cell align="end">{{ $this->money($extra['amount_base']) }}</flux:table.cell>@endif</flux:table.row>@empty<flux:table.row><flux:table.cell :colspan="$capabilities['financial'] ? 3 : 2"><div class="py-8 text-center"><flux:text>No hay extras vendidos en este período.</flux:text></div></flux:table.cell></flux:table.row>@endforelse</flux:table.rows></flux:table></div>
+            </flux:card>
         </section>
     @endif
 
@@ -229,7 +251,7 @@ new #[Title('Reportes')] class extends Component
             @if($exportScope === 'current')
                 <flux:select wire:model="exportSection" label="Sección">
                     <flux:select.option value="summary">Resumen</flux:select.option>
-                    @if($capabilities['sales'])<flux:select.option value="sales">Ventas</flux:select.option><flux:select.option value="bouquets">Ramos</flux:select.option>@endif
+                    @if($capabilities['sales'])<flux:select.option value="sales">Ventas</flux:select.option><flux:select.option value="orders">Pedidos y reservas</flux:select.option><flux:select.option value="bouquets">Ramos</flux:select.option><flux:select.option value="extras">Extras vendidos</flux:select.option>@endif
                     @if($capabilities['inventory'])<flux:select.option value="inventory">Inventario</flux:select.option>@endif
                     @if($capabilities['expenses'])<flux:select.option value="expenses">Gastos</flux:select.option>@endif
                     @if($capabilities['financial'])<flux:select.option value="profit">Ganancias</flux:select.option>@endif

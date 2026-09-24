@@ -4,11 +4,15 @@ use App\Actions\Users\ConfigureWorkerAccess;
 use App\Enums\ExpenseStatus;
 use App\Enums\MembershipStatus;
 use App\Enums\PaymentStatus;
+use App\Enums\SaleOrderStatus;
 use App\Enums\SaleStatus;
 use App\Models\Expense;
 use App\Models\Membership;
+use App\Models\PaymentMethod;
 use App\Models\Product;
 use App\Models\Sale;
+use App\Models\SaleExtra;
+use App\Models\SaleExtraLine;
 use App\Models\SaleItem;
 use App\Models\SalePayment;
 use App\Models\StockBalance;
@@ -163,6 +167,92 @@ test('partial payments separate sold collected and pending amounts', function ()
     expect($report['general']['total_sold_base'])->toBe('100.0000')
         ->and($report['general']['collected_base'])->toBe('40.0000')
         ->and($report['general']['pending_base'])->toBe('60.0000');
+});
+
+test('cash and qr collections use real split payments and payment method codes', function () {
+    $context = expenseContext('Cobros mixtos');
+    $methods = PaymentMethod::query()->withoutGlobalScope('company')
+        ->where('company_id', $context['company']->getKey())->get()->keyBy('code');
+    $sale = Sale::factory()->create([
+        'company_id' => $context['company']->getKey(),
+        'confirmed_by_membership_id' => $context['membership']->getKey(),
+        'total_base' => 300,
+        'paid_total_base' => 300,
+        'balance_due_base' => 0,
+        'payment_status' => PaymentStatus::Paid,
+    ]);
+    foreach ([['cash', 100], ['qr', 200]] as [$code, $amount]) {
+        SalePayment::factory()->create([
+            'company_id' => $context['company']->getKey(),
+            'sale_id' => $sale->getKey(),
+            'payment_method_id' => $methods[$code]->getKey(),
+            'payment_method_name' => $methods[$code]->name,
+            'received_by_membership_id' => $context['membership']->getKey(),
+            'amount_base' => $amount,
+            'occurred_at' => now(),
+        ]);
+    }
+
+    $report = app(BusinessReports::class)->summary($context['membership']);
+
+    expect($report['sales']['cash_collected_base'])->toBe('100.0000')
+        ->and($report['sales']['qr_collected_base'])->toBe('200.0000')
+        ->and($report['sales']['other_collected_base'])->toBe('0.0000')
+        ->and($report['sales']['collected_base'])->toBe('300.0000')
+        ->and(collect($report['sales']['by_payment_method'])->pluck('code'))->toContain('cash', 'qr');
+});
+
+test('extras report groups immutable sale snapshots', function () {
+    $context = expenseContext('Reporte extras');
+    $extra = SaleExtra::factory()->create(['company_id' => $context['company']->getKey(), 'name' => 'Delivery']);
+    foreach ([[2, 40], [3, 60]] as [$quantity, $subtotal]) {
+        $sale = Sale::factory()->create([
+            'company_id' => $context['company']->getKey(),
+            'confirmed_by_membership_id' => $context['membership']->getKey(),
+        ]);
+        SaleExtraLine::factory()->create([
+            'company_id' => $context['company']->getKey(),
+            'sale_id' => $sale->getKey(),
+            'sale_extra_id' => $extra->getKey(),
+            'extra_name' => 'Delivery histórico',
+            'quantity' => $quantity,
+            'unit_price_base' => 20,
+            'subtotal_base' => $subtotal,
+        ]);
+    }
+
+    $extraRow = collect(app(BusinessReports::class)->summary($context['membership'])['extras'])->sole();
+
+    expect($extraRow['name'])->toBe('Delivery histórico')
+        ->and($extraRow['quantity'])->toBe('5.000000')
+        ->and($extraRow['amount_base'])->toBe('100.0000');
+});
+
+test('orders report exposes effective sale delivery and current statuses', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-09-23 12:00:00', 'America/La_Paz'));
+    $context = expenseContext('Reporte pedidos');
+    Sale::factory()->create([
+        'company_id' => $context['company']->getKey(),
+        'confirmed_by_membership_id' => $context['membership']->getKey(),
+        'number' => 'V-RESERVA-001',
+        'customer_name' => 'María',
+        'occurred_at' => CarbonImmutable::parse('2026-09-23 09:00:00', 'America/La_Paz')->utc(),
+        'delivery_at' => CarbonImmutable::parse('2026-09-24 08:00:00', 'America/La_Paz')->utc(),
+        'order_status' => SaleOrderStatus::Reserved,
+        'payment_status' => PaymentStatus::Partial,
+        'total_base' => 100,
+        'paid_total_base' => 40,
+        'balance_due_base' => 60,
+    ]);
+
+    $order = collect(app(BusinessReports::class)->summary($context['membership'])['orders'])->sole();
+
+    expect($order['number'])->toBe('V-RESERVA-001')
+        ->and($order['occurred_at']->timezone('America/La_Paz')->format('Y-m-d H:i'))->toBe('2026-09-23 09:00')
+        ->and($order['delivery_at']->timezone('America/La_Paz')->format('Y-m-d H:i'))->toBe('2026-09-24 08:00')
+        ->and($order['order_status'])->toBe('Reservado')
+        ->and($order['payment_status'])->toBe('Parcial');
+    CarbonImmutable::setTestNow();
 });
 
 test('historical bouquet cost does not change with current inventory costs', function () {

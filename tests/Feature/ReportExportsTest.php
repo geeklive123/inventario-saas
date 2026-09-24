@@ -11,10 +11,12 @@ use App\Enums\SaleStatus;
 use App\Models\Expense;
 use App\Models\Membership;
 use App\Models\Module;
+use App\Models\PaymentMethod;
 use App\Models\Sale;
 use App\Models\SaleItem;
 use App\Models\SalePayment;
 use App\Models\User;
+use App\Services\Reports\ReportExportData;
 use Database\Seeders\DatabaseSeeder;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
@@ -59,7 +61,7 @@ test('owner exports complete professional xlsx and pdf reports', function () {
     expect($xlsx->baseResponse)->toBeInstanceOf(BinaryFileResponse::class);
     $spreadsheet = IOFactory::load($xlsx->baseResponse->getFile()->getPathname());
 
-    expect($spreadsheet->getSheetNames())->toBe(['Resumen', 'Ventas', 'Ramos', 'Inventario', 'Gastos', 'Ganancias'])
+    expect($spreadsheet->getSheetNames())->toBe(['Resumen', 'Ventas', 'Pedidos y reservas', 'Ramos', 'Extras vendidos', 'Inventario', 'Gastos', 'Ganancias'])
         ->and($spreadsheet->getSheetByName('Ventas')?->getFreezePane())->not->toBeNull()
         ->and($spreadsheet->getSheetByName('Ventas')?->getAutoFilter()->getRange())->not->toBe('');
 
@@ -71,6 +73,51 @@ test('owner exports complete professional xlsx and pdf reports', function () {
 
     expect($pdf->headers->get('content-type'))->toContain('application/pdf')
         ->and($pdf->getContent())->toStartWith('%PDF');
+});
+
+test('pdf and xlsx include cash qr and total collection breakdowns', function () {
+    $context = reportExportContext('Florería desglose cobros');
+    $companyId = $context['membership']->company_id;
+    $methods = PaymentMethod::query()->withoutGlobalScope('company')
+        ->where('company_id', $companyId)->get()->keyBy('code');
+    $sale = Sale::factory()->create([
+        'company_id' => $companyId,
+        'confirmed_by_membership_id' => $context['membership']->getKey(),
+        'total_base' => 300,
+        'paid_total_base' => 300,
+        'balance_due_base' => 0,
+        'payment_status' => PaymentStatus::Paid,
+    ]);
+    foreach ([['cash', 100], ['qr', 200]] as [$code, $amount]) {
+        SalePayment::factory()->create([
+            'company_id' => $companyId,
+            'sale_id' => $sale->getKey(),
+            'payment_method_id' => $methods[$code]->getKey(),
+            'payment_method_name' => $methods[$code]->name,
+            'received_by_membership_id' => $context['membership']->getKey(),
+            'amount_base' => $amount,
+            'occurred_at' => now(),
+        ]);
+    }
+
+    $document = app(ReportExportData::class)->build(
+        $context['membership'], 'today', null, null, 'current', 'sales',
+    );
+    $pdfHtml = view('reports.pdf', compact('document'))->render();
+
+    expect($pdfHtml)->toContain('Cobros en efectivo', 'Cobros por QR', 'Total cobrado')
+        ->toContain('100,00', '200,00', '300,00');
+
+    $xlsx = $this->actingAs($context['owner'])
+        ->withSession(['current_membership_id' => $context['membership']->getKey()])
+        ->get(route('reports.export', [
+            'format' => 'xlsx', 'period' => 'today', 'scope' => 'current', 'section' => 'sales',
+        ]))->assertOk();
+    $values = workbookValues($xlsx->baseResponse);
+
+    expect($values)->toContain('Cobros en efectivo', 'Cobros por QR', 'Total cobrado')
+        ->and(collect($values)->map(fn (string $value): float => (float) $value)->all())
+        ->toContain(100.0, 200.0, 300.0);
 });
 
 test('current section export contains only the selected authorized sheet', function () {
@@ -150,13 +197,15 @@ test('exports respect dates statuses partial payments and company isolation', fu
         'occurred_at' => now(),
     ]);
 
+    $companyDate = now($companyA['membership']->company->timezone)->toDateString();
+
     $response = $this->actingAs($companyA['owner'])
         ->withSession(['current_membership_id' => $companyA['membership']->getKey()])
         ->get(route('reports.export', [
             'format' => 'xlsx',
             'period' => 'custom',
-            'date_from' => now()->toDateString(),
-            'date_to' => now()->toDateString(),
+            'date_from' => $companyDate,
+            'date_to' => $companyDate,
             'scope' => 'full',
             'section' => 'summary',
         ]))->assertOk();

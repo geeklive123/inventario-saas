@@ -9,8 +9,10 @@ use App\Enums\SaleStatus;
 use App\Enums\StockMovementType;
 use App\Models\Expense;
 use App\Models\Membership;
+use App\Models\PaymentMethod;
 use App\Models\Product;
 use App\Models\Sale;
+use App\Models\SaleExtraLine;
 use App\Models\SaleItem;
 use App\Models\SalePayment;
 use App\Models\StockBalance;
@@ -53,10 +55,17 @@ class BusinessReports
         $voidedCount = Sale::query()->where('company_id', $companyId)
             ->where('status', SaleStatus::Voided)->whereBetween('occurred_at', [$from, $to])->count();
 
-        $payments = SalePayment::query()->where('company_id', $companyId)
-            ->whereBetween('occurred_at', [$from, $to])
+        $paymentsTable = (new SalePayment)->getTable();
+        $payments = SalePayment::query()->where("{$paymentsTable}.company_id", $companyId)
+            ->whereBetween("{$paymentsTable}.occurred_at", [$from, $to])
             ->whereHas('sale', fn (Builder $query) => $query->where('status', SaleStatus::Confirmed));
         $collected = Decimal::normalize((clone $payments)->sum('amount_base'), 4);
+        $paymentsByMethod = $capabilities['financial'] ? $this->paymentsByMethod($payments) : [];
+        $cashCollected = $this->paymentAmountByCode($paymentsByMethod, 'cash');
+        $qrCollected = $this->paymentAmountByCode($paymentsByMethod, 'qr');
+        $otherCollected = Decimal::normalize(collect($paymentsByMethod)
+            ->reject(fn (array $method): bool => in_array($method['code'], ['cash', 'qr'], true))
+            ->sum('amount_base'), 4);
 
         $confirmedExpenses = Expense::query()->where('company_id', $companyId)
             ->where('status', ExpenseStatus::Confirmed)->whereBetween('occurred_at', [$from, $to]);
@@ -86,9 +95,16 @@ class BusinessReports
                 'pending_base' => $capabilities['financial'] ? $pending : null,
                 'average_ticket_base' => $capabilities['financial'] && $salesCount > 0
                     ? Decimal::normalize(bcdiv($totalSold, (string) $salesCount, 4), 4) : null,
-                'by_payment_method' => $capabilities['financial'] ? $this->paymentsByMethod($payments) : [],
+                'cash_collected_base' => $capabilities['financial'] ? $cashCollected : null,
+                'qr_collected_base' => $capabilities['financial'] ? $qrCollected : null,
+                'other_collected_base' => $capabilities['financial'] ? $otherCollected : null,
+                'by_payment_method' => $paymentsByMethod,
                 'by_responsible' => $this->salesByResponsible($confirmedSales),
             ] : null,
+            'orders' => $capabilities['sales']
+                ? $this->orderReport($companyId, $from, $to, $capabilities['financial']) : null,
+            'extras' => $capabilities['sales']
+                ? $this->extraReport($companyId, $from, $to, $capabilities['financial']) : null,
             'bouquets' => $capabilities['sales']
                 ? $this->bouquetReport($companyId, $from, $to, $capabilities['financial']) : null,
             'inventory' => $capabilities['inventory']
@@ -137,15 +153,82 @@ class BusinessReports
 
     /**
      * @param  Builder<SalePayment>  $payments
-     * @return list<array{name: string, amount_base: numeric-string}>
+     * @return list<array{code: string, name: string, amount_base: numeric-string}>
      */
     private function paymentsByMethod(Builder $payments): array
     {
-        return array_values((clone $payments)->select('payment_method_name')->selectRaw('SUM(amount_base) as amount_base')
-            ->groupBy('payment_method_name')->orderByDesc('amount_base')->get()
+        $paymentsTable = (new SalePayment)->getTable();
+        $methodsTable = (new PaymentMethod)->getTable();
+
+        return array_values((clone $payments)
+            ->join($methodsTable, function ($join) use ($methodsTable, $paymentsTable): void {
+                $join->on("{$methodsTable}.id", '=', "{$paymentsTable}.payment_method_id")
+                    ->on("{$methodsTable}.company_id", '=', "{$paymentsTable}.company_id");
+            })
+            ->select("{$paymentsTable}.payment_method_name")
+            ->addSelect("{$methodsTable}.code")
+            ->selectRaw('SUM(sale_payments.amount_base) as amount_base')
+            ->groupBy("{$methodsTable}.code", "{$paymentsTable}.payment_method_name")
+            ->orderByDesc('amount_base')->get()
             ->map(fn (SalePayment $payment): array => [
+                'code' => (string) $payment->getAttribute('code'),
                 'name' => $payment->payment_method_name,
                 'amount_base' => Decimal::normalize($payment->amount_base, 4),
+            ])->all());
+    }
+
+    /** @param list<array{code: string, name: string, amount_base: numeric-string}> $payments */
+    private function paymentAmountByCode(array $payments, string $code): string
+    {
+        return Decimal::normalize(collect($payments)
+            ->where('code', $code)
+            ->sum('amount_base'), 4);
+    }
+
+    /** @return list<array<string, mixed>> */
+    private function orderReport(int $companyId, CarbonImmutable $from, CarbonImmutable $to, bool $financial): array
+    {
+        return array_values(Sale::query()
+            ->where('company_id', $companyId)
+            ->where('status', SaleStatus::Confirmed)
+            ->whereBetween('occurred_at', [$from, $to])
+            ->orderBy('delivery_at')
+            ->orderByDesc('occurred_at')
+            ->get([
+                'id', 'number', 'customer_name', 'occurred_at', 'delivery_at',
+                'order_status', 'payment_status', 'total_base',
+            ])
+            ->map(fn (Sale $sale): array => [
+                'number' => $sale->number,
+                'customer' => $sale->customer_name ?: 'Consumidor final',
+                'occurred_at' => $sale->occurred_at,
+                'delivery_at' => $sale->delivery_at,
+                'order_status' => $sale->order_status->label(),
+                'total_base' => $financial ? $sale->total_base : null,
+                'payment_status' => $sale->payment_status->label(),
+            ])->all());
+    }
+
+    /** @return list<array{name: string, quantity: numeric-string, amount_base: numeric-string|null}> */
+    private function extraReport(int $companyId, CarbonImmutable $from, CarbonImmutable $to, bool $financial): array
+    {
+        return array_values(SaleExtraLine::query()
+            ->where('company_id', $companyId)
+            ->whereHas('sale', fn (Builder $query) => $query
+                ->where('status', SaleStatus::Confirmed)
+                ->whereBetween('occurred_at', [$from, $to]))
+            ->select('extra_name')
+            ->selectRaw('SUM(quantity) as quantity')
+            ->selectRaw('SUM(subtotal_base) as amount_base')
+            ->groupBy('extra_name')
+            ->orderByDesc('quantity')
+            ->get()
+            ->map(fn (SaleExtraLine $line): array => [
+                'name' => $line->extra_name,
+                'quantity' => Decimal::normalize($line->getAttribute('quantity'), 6),
+                'amount_base' => $financial
+                    ? Decimal::normalize($line->getAttribute('amount_base'), 4)
+                    : null,
             ])->all());
     }
 

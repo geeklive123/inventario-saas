@@ -9,6 +9,7 @@ use App\Actions\Modules\SetModuleStatus;
 use App\Actions\Sales\ConfirmSale;
 use App\Actions\Sales\RegisterSalePayment;
 use App\Actions\Sales\SaveSaleExtra;
+use App\Actions\Sales\SetSaleExtraStatus;
 use App\Actions\Sales\UpdateSaleOrderStatus;
 use App\Actions\Sales\VoidSale;
 use App\Actions\Users\CreateWorker;
@@ -33,6 +34,7 @@ use App\Models\Unit;
 use App\Models\User;
 use App\Models\Warehouse;
 use App\Services\Dashboard\BusinessDashboard;
+use App\Services\Reports\BusinessReports;
 use Carbon\CarbonImmutable;
 use Database\Seeders\DatabaseSeeder;
 
@@ -128,6 +130,44 @@ test('a later payment completes the same partial sale', function () {
         ->and(Sale::query()->count())->toBe(1);
 });
 
+test('a later historical payment uses company timezone and reports on its real date', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-09-23 12:00:00', 'America/La_Paz'));
+    $context = paymentFeatureContext();
+    $sale = paymentFeatureSale($context, [['payment_method' => $context['cash'], 'amount_base' => 40]]);
+    $receivedAt = CarbonImmutable::parse('2026-09-22 18:30:00', 'America/La_Paz');
+
+    $payment = app(RegisterSalePayment::class)->handle(
+        $context['membership'], $sale, $context['qr'], 60, $receivedAt,
+    );
+    $report = app(BusinessReports::class)->summary(
+        $context['membership'], 'custom', '2026-09-22', '2026-09-22',
+    );
+
+    expect($payment->occurred_at->timezone('America/La_Paz')->format('Y-m-d H:i'))->toBe('2026-09-22 18:30')
+        ->and($payment->getRawOriginal('occurred_at'))->toBe('2026-09-22 22:30:00')
+        ->and($report['sales']['collected_base'])->toBe('60.0000')
+        ->and($report['sales']['qr_collected_base'])->toBe('60.0000');
+    CarbonImmutable::setTestNow();
+});
+
+test('a future payment is rejected without modifying payment totals', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-09-23 12:00:00', 'America/La_Paz'));
+    $context = paymentFeatureContext();
+    $sale = paymentFeatureSale($context, [['payment_method' => $context['cash'], 'amount_base' => 40]]);
+
+    expect(fn () => app(RegisterSalePayment::class)->handle(
+        $context['membership'],
+        $sale,
+        $context['qr'],
+        60,
+        CarbonImmutable::parse('2026-09-23 12:01:00', 'America/La_Paz'),
+    ))->toThrow(DomainException::class, 'no puede ser futura');
+
+    expect($sale->refresh()->paid_total_base)->toBe('40.0000')
+        ->and($sale->payments()->count())->toBe(1);
+    CarbonImmutable::setTestNow();
+});
+
 test('a payment cannot exceed the locked outstanding balance', function () {
     $context = paymentFeatureContext();
     $sale = paymentFeatureSale($context, [['payment_method' => $context['cash'], 'amount_base' => 80]]);
@@ -167,6 +207,19 @@ test('changing an extra catalog price does not alter a historical sale', functio
 
     expect($sale->extraLines()->sole()->unit_price_base)->toBe('15.0000')
         ->and($sale->refresh()->total_base)->toBe('115.0000');
+});
+
+test('an administrator can deactivate and reactivate an extra without changing history', function () {
+    $context = paymentFeatureContext();
+    $extra = app(SaveSaleExtra::class)->handle($context['membership'], 'Chocolates', 25, SaleExtraType::Product);
+    $sale = paymentFeatureSale($context, [], [['extra' => $extra, 'quantity' => 2]]);
+
+    app(SetSaleExtraStatus::class)->handle($context['membership'], $extra, false);
+    expect($extra->refresh()->is_active)->toBeFalse()
+        ->and($sale->extraLines()->sole()->extra_name)->toBe('Chocolates');
+
+    app(SetSaleExtraStatus::class)->handle($context['membership'], $extra, true);
+    expect($extra->refresh()->is_active)->toBeTrue();
 });
 
 test('an expense with invoice requires its invoice number', function () {

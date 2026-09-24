@@ -12,6 +12,7 @@ use App\Models\Sale;
 use App\Models\SalePayment;
 use App\Support\Authorization\CompanyAccess;
 use App\Support\Decimal;
+use Carbon\CarbonImmutable;
 use Carbon\CarbonInterface;
 use DomainException;
 use Illuminate\Support\Facades\DB;
@@ -39,7 +40,15 @@ class RegisterSalePayment
             throw new DomainException('El importe cobrado debe ser mayor que cero.');
         }
 
-        return DB::transaction(function () use ($actor, $sale, $paymentMethod, $amount, $occurredAt): SalePayment {
+        $effectiveOccurredAt = $occurredAt === null
+            ? CarbonImmutable::now('UTC')
+            : CarbonImmutable::instance($occurredAt)->utc();
+
+        if ($effectiveOccurredAt->isFuture()) {
+            throw new DomainException('La fecha y hora del pago no puede ser futura.');
+        }
+
+        return DB::transaction(function () use ($actor, $sale, $paymentMethod, $amount, $effectiveOccurredAt): SalePayment {
             $lockedActor = Membership::query()
                 ->withoutGlobalScope('company')
                 ->whereKey($actor->getKey())
@@ -87,7 +96,7 @@ class RegisterSalePayment
                 'payment_method_name' => $lockedMethod->name,
                 'amount_base' => $amount,
                 'received_by_membership_id' => $lockedActor->getKey(),
-                'occurred_at' => $occurredAt ?? now(),
+                'occurred_at' => $effectiveOccurredAt,
             ]);
 
             $lockedSale->update([

@@ -78,7 +78,9 @@ class ReportExportData
 
         if ($capabilities['sales']) {
             $sections['sales'] = $this->salesSection($membership, $report, $financial);
+            $sections['orders'] = $this->ordersSection($report, $financial);
             $sections['bouquets'] = $this->bouquetsSection($report, $financial);
+            $sections['extras'] = $this->extrasSection($report, $financial);
         }
 
         if ($capabilities['inventory']) {
@@ -142,7 +144,10 @@ class ReportExportData
         if ($financial) {
             array_push($metrics,
                 ['label' => 'Monto vendido', 'value' => $report['sales']['total_sold_base'], 'type' => 'money'],
-                ['label' => 'Monto cobrado', 'value' => $report['sales']['collected_base'], 'type' => 'money'],
+                ['label' => 'Cobros en efectivo', 'value' => $report['sales']['cash_collected_base'], 'type' => 'money'],
+                ['label' => 'Cobros por QR', 'value' => $report['sales']['qr_collected_base'], 'type' => 'money'],
+                ['label' => 'Otros métodos', 'value' => $report['sales']['other_collected_base'], 'type' => 'money'],
+                ['label' => 'Total cobrado', 'value' => $report['sales']['collected_base'], 'type' => 'money'],
                 ['label' => 'Saldo pendiente', 'value' => $report['sales']['pending_base'], 'type' => 'money'],
             );
             array_push($columns,
@@ -176,6 +181,44 @@ class ReportExportData
         $rows = array_values($rows);
 
         return $this->section('sales', 'Ventas', $metrics, $columns, $rows);
+    }
+
+    /** @param array<string, mixed> $report
+     * @return ReportSection
+     */
+    private function ordersSection(array $report, bool $financial): array
+    {
+        $columns = [
+            ['key' => 'number', 'label' => 'Nro. venta', 'type' => 'text'],
+            ['key' => 'customer', 'label' => 'Cliente', 'type' => 'text'],
+            ['key' => 'occurred_at', 'label' => 'Fecha de reserva / venta', 'type' => 'date'],
+            ['key' => 'delivery_at', 'label' => 'Fecha de entrega', 'type' => 'optional_date'],
+            ['key' => 'order_status', 'label' => 'Estado del pedido', 'type' => 'text'],
+            ['key' => 'payment_status', 'label' => 'Estado de pago', 'type' => 'text'],
+        ];
+
+        if ($financial) {
+            $columns[] = ['key' => 'total_base', 'label' => 'Total', 'type' => 'money'];
+        }
+
+        return $this->section('orders', 'Pedidos y reservas', [], $columns, $report['orders']);
+    }
+
+    /** @param array<string, mixed> $report
+     * @return ReportSection
+     */
+    private function extrasSection(array $report, bool $financial): array
+    {
+        $columns = [
+            ['key' => 'name', 'label' => 'Extra', 'type' => 'text'],
+            ['key' => 'quantity', 'label' => 'Cantidad vendida', 'type' => 'quantity'],
+        ];
+
+        if ($financial) {
+            $columns[] = ['key' => 'amount_base', 'label' => 'Importe total', 'type' => 'money'];
+        }
+
+        return $this->section('extras', 'Extras vendidos', [], $columns, $report['extras']);
     }
 
     /** @param array<string, mixed> $report

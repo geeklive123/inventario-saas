@@ -14,6 +14,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Carbon;
 
 /**
  * @property SaleStatus $status
@@ -27,6 +28,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property numeric-string|null $gross_margin_base
  * @property SaleInventoryStatus $inventory_status
  * @property int $confirmed_by_membership_id
+ * @property Carbon $occurred_at
+ * @property Carbon|null $delivery_at
  */
 #[Fillable([
     'company_id', 'sequence_number', 'number', 'branch_id', 'warehouse_id', 'customer_id',
