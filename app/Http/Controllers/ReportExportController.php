@@ -30,6 +30,7 @@ class ReportExportController extends Controller
             $validated['date_to'] ?? null,
             $validated['scope'],
             $validated['section'],
+            $validated['order_status'] ?? null,
         );
         $filename = Str::slug($document['company'].'-'.$document['report_name'].'-'.now()->format('Y-m-d-His'));
 

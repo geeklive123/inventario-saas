@@ -5,6 +5,7 @@ namespace App\Services\Reports;
 use App\Enums\ExpenseReceiptType;
 use App\Enums\ExpenseStatus;
 use App\Enums\SaleInventoryStatus;
+use App\Enums\SaleOrderStatus;
 use App\Enums\SaleStatus;
 use App\Enums\StockMovementType;
 use App\Models\Expense;
@@ -35,16 +36,21 @@ class BusinessReports
         string $period = 'today',
         ?string $customFrom = null,
         ?string $customTo = null,
+        ?string $orderStatus = null,
     ): array {
         $membership->loadMissing(['user', 'company.baseCurrency']);
         [$from, $to] = $this->range($membership, $period, $customFrom, $customTo);
         $capabilities = $this->access->capabilities($membership);
         $companyId = $membership->company_id;
+        $selectedOrderStatus = $this->orderStatus($orderStatus);
 
         $confirmedSales = Sale::query()->where('company_id', $companyId)
-            ->where('status', SaleStatus::Confirmed)->whereBetween('occurred_at', [$from, $to]);
+            ->where('status', SaleStatus::Confirmed)
+            ->whereBetween('occurred_at', [$from, $to])
+            ->when($selectedOrderStatus, fn (Builder $query, SaleOrderStatus $status) => $query->where('order_status', $status));
         $salesCount = (clone $confirmedSales)->count();
         $totalSold = Decimal::normalize((clone $confirmedSales)->sum('total_base'), 4);
+        $paidToPeriodSales = Decimal::normalize((clone $confirmedSales)->sum('paid_total_base'), 4);
         $hasIncompleteCosts = (clone $confirmedSales)
             ->where('inventory_status', SaleInventoryStatus::PendingRegularization)
             ->exists();
@@ -53,12 +59,18 @@ class BusinessReports
             : Decimal::normalize((clone $confirmedSales)->sum('total_cost_base'), 4);
         $pending = Decimal::normalize((clone $confirmedSales)->sum('balance_due_base'), 4);
         $voidedCount = Sale::query()->where('company_id', $companyId)
-            ->where('status', SaleStatus::Voided)->whereBetween('occurred_at', [$from, $to])->count();
+            ->where('status', SaleStatus::Voided)
+            ->whereBetween('occurred_at', [$from, $to])
+            ->when($selectedOrderStatus, fn (Builder $query, SaleOrderStatus $status) => $query->where('order_status', $status))
+            ->count();
 
         $paymentsTable = (new SalePayment)->getTable();
         $payments = SalePayment::query()->where("{$paymentsTable}.company_id", $companyId)
             ->whereBetween("{$paymentsTable}.occurred_at", [$from, $to])
-            ->whereHas('sale', fn (Builder $query) => $query->where('status', SaleStatus::Confirmed));
+            ->whereHas('sale', fn (Builder $query) => $query
+                ->where('company_id', $companyId)
+                ->where('status', SaleStatus::Confirmed)
+                ->when($selectedOrderStatus, fn (Builder $query, SaleOrderStatus $status) => $query->where('order_status', $status)));
         $collected = Decimal::normalize((clone $payments)->sum('amount_base'), 4);
         $paymentsByMethod = $capabilities['financial'] ? $this->paymentsByMethod($payments) : [];
         $cashCollected = $this->paymentAmountByCode($paymentsByMethod, 'cash');
@@ -77,10 +89,12 @@ class BusinessReports
             'period' => $period,
             'from' => $from,
             'to' => $to,
+            'order_status' => $selectedOrderStatus?->value,
             'capabilities' => $capabilities,
             'general' => [
                 'sales_count' => $capabilities['sales'] || $capabilities['financial'] ? $salesCount : null,
                 'total_sold_base' => $capabilities['financial'] ? $totalSold : null,
+                'paid_to_period_sales_base' => $capabilities['financial'] ? $paidToPeriodSales : null,
                 'collected_base' => $capabilities['financial'] ? $collected : null,
                 'pending_base' => $capabilities['financial'] ? $pending : null,
                 'expenses_base' => $capabilities['expenses'] || $capabilities['financial'] ? $expenseTotal : null,
@@ -91,6 +105,7 @@ class BusinessReports
                 'count' => $salesCount,
                 'voided_count' => $voidedCount,
                 'total_sold_base' => $capabilities['financial'] ? $totalSold : null,
+                'paid_to_period_sales_base' => $capabilities['financial'] ? $paidToPeriodSales : null,
                 'collected_base' => $capabilities['financial'] ? $collected : null,
                 'pending_base' => $capabilities['financial'] ? $pending : null,
                 'average_ticket_base' => $capabilities['financial'] && $salesCount > 0
@@ -102,11 +117,11 @@ class BusinessReports
                 'by_responsible' => $this->salesByResponsible($confirmedSales),
             ] : null,
             'orders' => $capabilities['sales']
-                ? $this->orderReport($companyId, $from, $to, $capabilities['financial']) : null,
+                ? $this->orderReport($companyId, $from, $to, $capabilities['financial'], $selectedOrderStatus) : null,
             'extras' => $capabilities['sales']
-                ? $this->extraReport($companyId, $from, $to, $capabilities['financial']) : null,
+                ? $this->extraReport($companyId, $from, $to, $capabilities['financial'], $selectedOrderStatus) : null,
             'bouquets' => $capabilities['sales']
-                ? $this->bouquetReport($companyId, $from, $to, $capabilities['financial']) : null,
+                ? $this->bouquetReport($companyId, $from, $to, $capabilities['financial'], $selectedOrderStatus) : null,
             'inventory' => $capabilities['inventory']
                 ? $this->inventoryReport($companyId, $from, $to, $capabilities['financial']) : null,
             'expenses' => $capabilities['expenses'] ? $this->expenseReport($confirmedExpenses, $expenseTotal) : null,
@@ -118,6 +133,16 @@ class BusinessReports
                 'estimated_result_base' => $estimatedResult,
             ] : null,
         ];
+    }
+
+    private function orderStatus(?string $orderStatus): ?SaleOrderStatus
+    {
+        if ($orderStatus === null || $orderStatus === '') {
+            return null;
+        }
+
+        return SaleOrderStatus::tryFrom($orderStatus)
+            ?? throw new DomainException('El estado del pedido seleccionado no es válido.');
     }
 
     /** @return array{0: CarbonImmutable, 1: CarbonImmutable} */
@@ -186,12 +211,18 @@ class BusinessReports
     }
 
     /** @return list<array<string, mixed>> */
-    private function orderReport(int $companyId, CarbonImmutable $from, CarbonImmutable $to, bool $financial): array
-    {
+    private function orderReport(
+        int $companyId,
+        CarbonImmutable $from,
+        CarbonImmutable $to,
+        bool $financial,
+        ?SaleOrderStatus $orderStatus,
+    ): array {
         return array_values(Sale::query()
             ->where('company_id', $companyId)
             ->where('status', SaleStatus::Confirmed)
             ->whereBetween('occurred_at', [$from, $to])
+            ->when($orderStatus, fn (Builder $query, SaleOrderStatus $status) => $query->where('order_status', $status))
             ->orderBy('delivery_at')
             ->orderByDesc('occurred_at')
             ->get([
@@ -210,13 +241,19 @@ class BusinessReports
     }
 
     /** @return list<array{name: string, quantity: numeric-string, amount_base: numeric-string|null}> */
-    private function extraReport(int $companyId, CarbonImmutable $from, CarbonImmutable $to, bool $financial): array
-    {
+    private function extraReport(
+        int $companyId,
+        CarbonImmutable $from,
+        CarbonImmutable $to,
+        bool $financial,
+        ?SaleOrderStatus $orderStatus,
+    ): array {
         return array_values(SaleExtraLine::query()
             ->where('company_id', $companyId)
             ->whereHas('sale', fn (Builder $query) => $query
                 ->where('status', SaleStatus::Confirmed)
-                ->whereBetween('occurred_at', [$from, $to]))
+                ->whereBetween('occurred_at', [$from, $to])
+                ->when($orderStatus, fn (Builder $query, SaleOrderStatus $status) => $query->where('order_status', $status)))
             ->select('extra_name')
             ->selectRaw('SUM(quantity) as quantity')
             ->selectRaw('SUM(subtotal_base) as amount_base')
@@ -250,11 +287,17 @@ class BusinessReports
     }
 
     /** @return array{quantity: numeric-string, top: list<array<string, mixed>>} */
-    private function bouquetReport(int $companyId, CarbonImmutable $from, CarbonImmutable $to, bool $financial): array
-    {
+    private function bouquetReport(
+        int $companyId,
+        CarbonImmutable $from,
+        CarbonImmutable $to,
+        bool $financial,
+        ?SaleOrderStatus $orderStatus,
+    ): array {
         $itemsQuery = SaleItem::query()->where('company_id', $companyId)
             ->whereHas('sale', fn (Builder $query) => $query->where('status', SaleStatus::Confirmed)
-                ->whereBetween('occurred_at', [$from, $to]));
+                ->whereBetween('occurred_at', [$from, $to])
+                ->when($orderStatus, fn (Builder $query, SaleOrderStatus $status) => $query->where('order_status', $status)));
         $quantity = Decimal::normalize((clone $itemsQuery)->sum('quantity'), 6);
         $items = (clone $itemsQuery)
             ->select('product_name')->selectRaw('SUM(quantity) as quantity')

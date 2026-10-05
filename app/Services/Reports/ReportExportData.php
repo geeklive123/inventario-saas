@@ -3,11 +3,13 @@
 namespace App\Services\Reports;
 
 use App\Enums\ExpenseStatus;
+use App\Enums\SaleOrderStatus;
 use App\Enums\SaleStatus;
 use App\Models\Expense;
 use App\Models\Membership;
 use App\Models\Sale;
 use App\Models\StockBalance;
+use App\Support\Decimal;
 use Carbon\CarbonInterface;
 use DomainException;
 use Illuminate\Auth\Access\AuthorizationException;
@@ -39,8 +41,9 @@ class ReportExportData
         ?string $dateTo,
         string $scope,
         string $section,
+        ?string $orderStatus = null,
     ): array {
-        $report = $this->reports->summary($membership, $period, $dateFrom, $dateTo);
+        $report = $this->reports->summary($membership, $period, $dateFrom, $dateTo, $orderStatus);
         $membership->loadMissing('company.baseCurrency');
         $sections = $this->sections($membership, $report);
 
@@ -50,6 +53,8 @@ class ReportExportData
             }
 
             $sections = [$section => $sections[$section]];
+        } else {
+            unset($sections['summary']);
         }
 
         $timezone = $membership->company->timezone;
@@ -61,7 +66,7 @@ class ReportExportData
             'currency' => $membership->company->baseCurrency->code,
             'report_name' => $scope === 'full' ? 'Reporte completo' : $sections[array_key_first($sections)]['title'],
             'period' => $this->periodLabel($period, $from->format('d/m/Y'), $to->format('d/m/Y')),
-            'filters' => $period === 'custom' ? "Desde {$from->format('d/m/Y')} hasta {$to->format('d/m/Y')}" : 'Período: '.$this->periodName($period),
+            'filters' => $this->filtersLabel($period, $from->format('d/m/Y'), $to->format('d/m/Y'), $orderStatus),
             'generated_at' => now($timezone),
             'sections' => array_values($sections),
         ];
@@ -107,6 +112,7 @@ class ReportExportData
         $labels = [
             'sales_count' => ['Ventas realizadas', 'integer'],
             'total_sold_base' => ['Total vendido', 'money'],
+            'paid_to_period_sales_base' => ['Abonado a estas ventas', 'money'],
             'collected_base' => ['Dinero cobrado', 'money'],
             'pending_base' => ['Pendiente por cobrar', 'money'],
             'expenses_base' => ['Gastos', 'money'],
@@ -133,26 +139,31 @@ class ReportExportData
             ['label' => 'Ventas anuladas', 'value' => $report['sales']['voided_count'], 'type' => 'integer'],
         ];
         $columns = [
-            ['key' => 'date', 'label' => 'Fecha', 'type' => 'date'],
+            ['key' => 'date', 'label' => 'Fecha efectiva de la venta', 'type' => 'date'],
             ['key' => 'number', 'label' => 'Número', 'type' => 'text'],
-            ['key' => 'customer', 'label' => 'Cliente', 'type' => 'text'],
-            ['key' => 'bouquets', 'label' => 'Ramos', 'type' => 'text'],
-            ['key' => 'payment_status', 'label' => 'Pago', 'type' => 'text'],
+            ['key' => 'customer', 'label' => 'Cliente / celular', 'type' => 'text'],
+            ['key' => 'bouquets', 'label' => 'Ramos / productos', 'type' => 'text'],
+            ['key' => 'order_status', 'label' => 'Estado del pedido', 'type' => 'text'],
+            ['key' => 'payment_status', 'label' => 'Estado de pago', 'type' => 'text'],
             ['key' => 'responsible', 'label' => 'Responsable', 'type' => 'text'],
         ];
 
         if ($financial) {
             array_push($metrics,
-                ['label' => 'Monto vendido', 'value' => $report['sales']['total_sold_base'], 'type' => 'money'],
-                ['label' => 'Cobros en efectivo', 'value' => $report['sales']['cash_collected_base'], 'type' => 'money'],
-                ['label' => 'Cobros por QR', 'value' => $report['sales']['qr_collected_base'], 'type' => 'money'],
-                ['label' => 'Otros métodos', 'value' => $report['sales']['other_collected_base'], 'type' => 'money'],
-                ['label' => 'Total cobrado', 'value' => $report['sales']['collected_base'], 'type' => 'money'],
+                ['label' => 'Total vendido', 'value' => $report['sales']['total_sold_base'], 'type' => 'money'],
+                ['label' => 'Abonado a estas ventas', 'value' => $report['sales']['paid_to_period_sales_base'], 'type' => 'money'],
                 ['label' => 'Saldo pendiente', 'value' => $report['sales']['pending_base'], 'type' => 'money'],
+                ['label' => 'Efectivo recibido durante el período', 'value' => $report['sales']['cash_collected_base'], 'type' => 'money'],
+                ['label' => 'QR recibido durante el período', 'value' => $report['sales']['qr_collected_base'], 'type' => 'money'],
+                ['label' => 'Otros métodos recibidos durante el período', 'value' => $report['sales']['other_collected_base'], 'type' => 'money'],
+                ['label' => 'Total cobrado durante el período', 'value' => $report['sales']['collected_base'], 'type' => 'money'],
             );
             array_push($columns,
                 ['key' => 'total', 'label' => 'Total', 'type' => 'money'],
-                ['key' => 'paid', 'label' => 'Pagado', 'type' => 'money'],
+                ['key' => 'cash_paid', 'label' => 'Efectivo', 'type' => 'money'],
+                ['key' => 'qr_paid', 'label' => 'QR', 'type' => 'money'],
+                ['key' => 'other_paid', 'label' => 'Otros', 'type' => 'money'],
+                ['key' => 'paid', 'label' => 'Abonado', 'type' => 'money'],
                 ['key' => 'balance', 'label' => 'Saldo', 'type' => 'money'],
             );
         }
@@ -160,19 +171,39 @@ class ReportExportData
         $rows = Sale::query()->where('company_id', $membership->company_id)
             ->where('status', SaleStatus::Confirmed)
             ->whereBetween('occurred_at', [$report['from'], $report['to']])
-            ->with(['items:id,sale_id,product_name,quantity', 'confirmedBy.user:id,name'])
+            ->when($report['order_status'] ?? null, fn ($query, string $status) => $query->where('order_status', $status))
+            ->with([
+                'items:id,sale_id,product_name,quantity',
+                'payments:id,company_id,sale_id,payment_method_id,amount_base',
+                'payments.paymentMethod:id,company_id,code',
+                'confirmedBy.user:id,name',
+            ])
             ->latest('occurred_at')->get()->map(function (Sale $sale) use ($financial): array {
                 $row = [
                     'date' => $sale->occurred_at,
                     'number' => $sale->number,
-                    'customer' => $sale->customer_name ?: 'Consumidor final',
+                    'customer' => $sale->customer_name ?: 'Consumidor final / sin celular',
                     'bouquets' => $sale->items->map(fn ($item): string => "{$item->quantity} {$item->product_name}")->join(', '),
+                    'order_status' => $sale->order_status->label(),
                     'payment_status' => $sale->payment_status->label(),
                     'responsible' => $sale->confirmedBy->user->name,
                 ];
 
                 if ($financial) {
-                    $row += ['total' => $sale->total_base, 'paid' => $sale->paid_total_base, 'balance' => $sale->balance_due_base];
+                    $cashPaid = $sale->payments->filter(fn ($payment): bool => $payment->paymentMethod->code === 'cash')->sum('amount_base');
+                    $qrPaid = $sale->payments->filter(fn ($payment): bool => $payment->paymentMethod->code === 'qr')->sum('amount_base');
+                    $otherPaid = $sale->payments->reject(
+                        fn ($payment): bool => in_array($payment->paymentMethod->code, ['cash', 'qr'], true),
+                    )->sum('amount_base');
+
+                    $row += [
+                        'total' => $sale->total_base,
+                        'cash_paid' => Decimal::normalize($cashPaid, 4),
+                        'qr_paid' => Decimal::normalize($qrPaid, 4),
+                        'other_paid' => Decimal::normalize($otherPaid, 4),
+                        'paid' => $sale->paid_total_base,
+                        'balance' => $sale->balance_due_base,
+                    ];
                 }
 
                 return $row;
@@ -371,6 +402,17 @@ class ReportExportData
     private function periodLabel(string $period, string $from, string $to): string
     {
         return $period === 'custom' ? "{$from} - {$to}" : $this->periodName($period)." ({$from} - {$to})";
+    }
+
+    private function filtersLabel(string $period, string $from, string $to, ?string $orderStatus): string
+    {
+        $filters = [$period === 'custom' ? "Desde {$from} hasta {$to}" : 'Período: '.$this->periodName($period)];
+
+        if ($orderStatus !== null && $orderStatus !== '') {
+            $filters[] = 'Estado del pedido: '.SaleOrderStatus::from($orderStatus)->label();
+        }
+
+        return implode(' · ', $filters);
     }
 
     private function periodName(string $period): string

@@ -165,8 +165,71 @@ test('partial payments separate sold collected and pending amounts', function ()
     $report = app(BusinessReports::class)->summary($context['membership']);
 
     expect($report['general']['total_sold_base'])->toBe('100.0000')
+        ->and($report['general']['paid_to_period_sales_base'])->toBe('40.0000')
         ->and($report['general']['collected_base'])->toBe('40.0000')
-        ->and($report['general']['pending_base'])->toBe('60.0000');
+        ->and($report['general']['pending_base'])->toBe('60.0000')
+        ->and(bcadd($report['general']['paid_to_period_sales_base'], $report['general']['pending_base'], 4))
+        ->toBe($report['general']['total_sold_base']);
+});
+
+test('sale in period keeps all persisted paid amount but excludes payments outside period cash movement', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-09-16 12:00:00', 'America/La_Paz'));
+    $context = expenseContext('Venta del período con pago posterior');
+    $sale = Sale::factory()->create([
+        'company_id' => $context['company']->getKey(),
+        'confirmed_by_membership_id' => $context['membership']->getKey(),
+        'occurred_at' => now(),
+        'total_base' => 100,
+        'paid_total_base' => 40,
+        'balance_due_base' => 60,
+        'payment_status' => PaymentStatus::Partial,
+    ]);
+    SalePayment::factory()->create([
+        'company_id' => $context['company']->getKey(),
+        'sale_id' => $sale->getKey(),
+        'received_by_membership_id' => $context['membership']->getKey(),
+        'amount_base' => 40,
+        'occurred_at' => now()->addDay(),
+    ]);
+
+    $report = app(BusinessReports::class)->summary($context['membership'], 'today');
+
+    expect($report['general']['total_sold_base'])->toBe('100.0000')
+        ->and($report['general']['paid_to_period_sales_base'])->toBe('40.0000')
+        ->and($report['general']['pending_base'])->toBe('60.0000')
+        ->and($report['general']['collected_base'])->toBe('0.0000');
+
+    CarbonImmutable::setTestNow();
+});
+
+test('payment in period counts as cash movement when its sale is outside period', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-09-16 12:00:00', 'America/La_Paz'));
+    $context = expenseContext('Pago del período para venta anterior');
+    $sale = Sale::factory()->create([
+        'company_id' => $context['company']->getKey(),
+        'confirmed_by_membership_id' => $context['membership']->getKey(),
+        'occurred_at' => now()->subDay(),
+        'total_base' => 100,
+        'paid_total_base' => 50,
+        'balance_due_base' => 50,
+        'payment_status' => PaymentStatus::Partial,
+    ]);
+    SalePayment::factory()->create([
+        'company_id' => $context['company']->getKey(),
+        'sale_id' => $sale->getKey(),
+        'received_by_membership_id' => $context['membership']->getKey(),
+        'amount_base' => 50,
+        'occurred_at' => now(),
+    ]);
+
+    $report = app(BusinessReports::class)->summary($context['membership'], 'today');
+
+    expect($report['general']['total_sold_base'])->toBe('0.0000')
+        ->and($report['general']['paid_to_period_sales_base'])->toBe('0.0000')
+        ->and($report['general']['pending_base'])->toBe('0.0000')
+        ->and($report['general']['collected_base'])->toBe('50.0000');
+
+    CarbonImmutable::setTestNow();
 });
 
 test('cash and qr collections use real split payments and payment method codes', function () {
@@ -253,6 +316,85 @@ test('orders report exposes effective sale delivery and current statuses', funct
         ->and($order['order_status'])->toBe('Reservado')
         ->and($order['payment_status'])->toBe('Parcial');
     CarbonImmutable::setTestNow();
+});
+
+test('order status filters sales cash movement and sales-derived sections without filtering expenses or inventory', function () {
+    $context = expenseContext('Filtro estado pedido');
+    $methods = PaymentMethod::query()->withoutGlobalScope('company')
+        ->where('company_id', $context['company']->getKey())->get()->keyBy('code');
+
+    foreach ([SaleOrderStatus::Delivered, SaleOrderStatus::Reserved] as $index => $orderStatus) {
+        $sale = Sale::factory()->create([
+            'company_id' => $context['company']->getKey(),
+            'confirmed_by_membership_id' => $context['membership']->getKey(),
+            'order_status' => $orderStatus,
+            'total_base' => 100 + $index * 100,
+            'paid_total_base' => 50 + $index * 50,
+            'balance_due_base' => 50 + $index * 50,
+            'payment_status' => PaymentStatus::Partial,
+        ]);
+        SaleItem::factory()->create([
+            'company_id' => $context['company']->getKey(),
+            'sale_id' => $sale->getKey(),
+            'product_name' => $orderStatus->label(),
+        ]);
+        SalePayment::factory()->create([
+            'company_id' => $context['company']->getKey(),
+            'sale_id' => $sale->getKey(),
+            'payment_method_id' => $methods['cash']->getKey(),
+            'payment_method_name' => $methods['cash']->name,
+            'received_by_membership_id' => $context['membership']->getKey(),
+            'amount_base' => 50 + $index * 50,
+        ]);
+    }
+    Expense::factory()->create([
+        'company_id' => $context['company']->getKey(),
+        'membership_id' => $context['membership']->getKey(),
+        'amount_base' => 25,
+        'status' => ExpenseStatus::Confirmed,
+    ]);
+    StockBalance::factory()->create([
+        'company_id' => $context['company']->getKey(),
+        'quantity' => 2,
+        'inventory_value_base' => 30,
+    ]);
+
+    $report = app(BusinessReports::class)->summary(
+        $context['membership'], 'today', null, null, SaleOrderStatus::Delivered->value,
+    );
+
+    expect($report['sales']['count'])->toBe(1)
+        ->and($report['sales']['total_sold_base'])->toBe('100.0000')
+        ->and($report['sales']['paid_to_period_sales_base'])->toBe('50.0000')
+        ->and($report['sales']['collected_base'])->toBe('50.0000')
+        ->and($report['orders'])->toHaveCount(1)
+        ->and($report['orders'][0]['order_status'])->toBe('Entregado')
+        ->and($report['bouquets']['top'])->toHaveCount(1)
+        ->and($report['bouquets']['top'][0]['name'])->toBe('Entregado')
+        ->and($report['expenses']['total_base'])->toBe('25.0000')
+        ->and($report['inventory']['current_value_base'])->toBe('30.0000');
+});
+
+test('cash movement ignores payments belonging to another company', function () {
+    $companyA = expenseContext('Cobros empresa A');
+    $companyB = expenseContext('Cobros empresa B');
+    $sale = Sale::factory()->create([
+        'company_id' => $companyB['company']->getKey(),
+        'confirmed_by_membership_id' => $companyB['membership']->getKey(),
+        'paid_total_base' => 100,
+        'balance_due_base' => 0,
+        'payment_status' => PaymentStatus::Paid,
+    ]);
+    SalePayment::factory()->create([
+        'company_id' => $companyB['company']->getKey(),
+        'sale_id' => $sale->getKey(),
+        'received_by_membership_id' => $companyB['membership']->getKey(),
+        'amount_base' => 100,
+    ]);
+
+    $report = app(BusinessReports::class)->summary($companyA['membership']);
+
+    expect($report['sales']['collected_base'])->toBe('0.0000');
 });
 
 test('historical bouquet cost does not change with current inventory costs', function () {

@@ -28,7 +28,12 @@ new #[Title('Regularizar inventario de venta')] class extends Component
     {
         $this->pendingId = $pendingId;
         Gate::authorize('view', $this->pending);
-        $this->allocations = [['product_id' => null, 'quantity' => '']];
+        $this->allocations = [[
+            'product_id' => $this->pending->planned_component_product_id,
+            'quantity' => $this->pending->planned_component_product_id === null
+                ? ''
+                : $this->pending->required_quantity,
+        ]];
     }
 
     public function addAllocation(): void
@@ -93,7 +98,8 @@ new #[Title('Regularizar inventario de venta')] class extends Component
     public function pending(): SaleInventoryPending
     {
         return SaleInventoryPending::query()->with([
-            'sale', 'saleItem', 'warehouse', 'regularizationLines.actualProduct', 'regularizedBy.user',
+            'sale', 'saleItem', 'warehouse', 'originalComponent', 'plannedComponent.unit',
+            'componentSnapshot', 'regularizationLines.actualProduct', 'regularizedBy.user',
         ])->findOrFail($this->pendingId);
     }
 
@@ -103,6 +109,10 @@ new #[Title('Regularizar inventario de venta')] class extends Component
         return Product::query()->with('unit:id,symbol')->where('is_active', true)
             ->where('item_type', ProductItemType::Physical)
             ->where('inventory_behavior', InventoryBehavior::Self)
+            ->when(
+                $this->pending->plannedComponent,
+                fn ($query, Product $planned) => $query->where('unit_id', $planned->unit_id),
+            )
             ->orderBy('name')->get();
     }
 
@@ -127,7 +137,7 @@ new #[Title('Regularizar inventario de venta')] class extends Component
 <div class="flex w-full flex-col gap-6">
     <div><flux:button variant="subtle" icon="arrow-left" :href="route('inventory.regularizations')" wire:navigate class="mb-3">Volver a pendientes</flux:button><flux:heading size="xl">Regularizar inventario · Venta {{ $this->pending->sale->number }}</flux:heading><flux:text>{{ $this->pending->warehouse->name }} · {{ $this->pending->sale->customer_name ?: 'Consumidor final' }}</flux:text></div>
 
-    <flux:card class="space-y-2"><flux:text size="sm">Componente solicitado</flux:text><flux:heading size="lg">{{ $this->pending->original_component_name }}</flux:heading><flux:text>{{ $this->pending->original_component_sku }} · Cantidad pendiente: <strong>{{ $this->formatQuantity($this->pending->required_quantity) }} {{ $this->pending->unit_symbol }}</strong></flux:text><flux:callout icon="information-circle">La selección aplica solo a esta venta. La receta original no se modificará.</flux:callout></flux:card>
+    <flux:card class="space-y-2"><flux:text size="sm">Componente solicitado</flux:text><flux:heading size="lg">{{ $this->pending->original_component_name }} @if($this->pending->planned_component_product_id && $this->pending->planned_component_product_id !== $this->pending->original_component_product_id)→ {{ $this->pending->planned_component_name }}@endif</flux:heading><flux:text>{{ $this->pending->original_component_sku }} @if($this->pending->planned_component_sku && $this->pending->planned_component_sku !== $this->pending->original_component_sku)→ {{ $this->pending->planned_component_sku }}@endif · Cantidad pendiente: <strong>{{ $this->formatQuantity($this->pending->required_quantity) }} {{ $this->pending->planned_unit_symbol ?? $this->pending->unit_symbol }}</strong></flux:text><flux:callout icon="information-circle">La selección aplica solo a esta venta. La receta original no se modificará.</flux:callout></flux:card>
 
     @if($this->pending->status === SaleInventoryPendingStatus::Cancelled)
         <flux:callout icon="x-circle" heading="Pendiente cancelado">La venta fue anulada. No se descontó inventario por este pendiente.</flux:callout>

@@ -17,12 +17,15 @@ use Illuminate\Support\Carbon;
  * @property SaleInventoryPendingStatus $status
  * @property numeric-string $required_quantity
  * @property numeric-string $regularized_quantity
+ * @property int|null $sale_item_component_id
+ * @property int|null $planned_component_product_id
  * @property int|null $stock_movement_id
  * @property int|null $regularized_by_membership_id
  * @property Carbon|null $regularized_at
  */
 #[Fillable([
-    'company_id', 'sale_id', 'sale_item_id', 'warehouse_id', 'original_component_product_id',
+    'company_id', 'sale_id', 'sale_item_id', 'sale_item_component_id', 'warehouse_id', 'original_component_product_id',
+    'planned_component_product_id', 'planned_component_name', 'planned_component_sku', 'planned_unit_symbol',
     'stock_movement_id', 'original_component_name', 'original_component_sku', 'unit_symbol',
     'required_quantity', 'regularized_quantity', 'status', 'regularized_at',
     'regularized_by_membership_id',
@@ -81,6 +84,12 @@ class SaleInventoryPending extends Model
         return $this->belongsTo(SaleItem::class);
     }
 
+    /** @return BelongsTo<SaleItemComponent, $this> */
+    public function componentSnapshot(): BelongsTo
+    {
+        return $this->belongsTo(SaleItemComponent::class, 'sale_item_component_id');
+    }
+
     /** @return BelongsTo<Warehouse, $this> */
     public function warehouse(): BelongsTo
     {
@@ -91,6 +100,12 @@ class SaleInventoryPending extends Model
     public function originalComponent(): BelongsTo
     {
         return $this->belongsTo(Product::class, 'original_component_product_id');
+    }
+
+    /** @return BelongsTo<Product, $this> */
+    public function plannedComponent(): BelongsTo
+    {
+        return $this->belongsTo(Product::class, 'planned_component_product_id');
     }
 
     /** @return BelongsTo<StockMovement, $this> */

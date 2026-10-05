@@ -31,6 +31,7 @@ use App\Models\SaleStockMovement;
 use App\Models\StockBalance;
 use App\Models\Warehouse;
 use App\Services\Inventory\InventoryService;
+use App\Services\Sales\SaleComponentRequirementCalculator;
 use App\Support\Authorization\CompanyAccess;
 use App\Support\Decimal;
 use Carbon\CarbonImmutable;
@@ -46,10 +47,11 @@ class ConfirmSale
     public function __construct(
         private InventoryService $inventory,
         private CompanyAccess $access,
+        private SaleComponentRequirementCalculator $requirementCalculator,
     ) {}
 
     /**
-     * @param  array<int, array{product: Product, quantity: int|float|string, customizations?: array<int, array{product: Product, quantity: int|float|string, unit_price_base?: int|float|string, note?: string|null}>}>  $lines
+     * @param  array<int, array{product: Product, quantity: int|float|string, component_overrides?: array<int, array{original_product_id: int, product: Product, quantity: int|float|string}>, customizations?: array<int, array{product: Product, quantity: int|float|string, unit_price_base?: int|float|string, note?: string|null}>}>  $lines
      * @param  array<int, array{payment_method: PaymentMethod, amount_base: int|float|string}>  $payments
      * @param  array<int, array{extra: SaleExtra, quantity: int|float|string, unit_price_base?: int|float|string}>  $extras
      */
@@ -174,10 +176,15 @@ class ConfirmSale
                             'company_id' => $company->getKey(),
                             'sale_id' => $sale->getKey(),
                             'sale_item_id' => $item->getKey(),
+                            'sale_item_component_id' => $componentSnapshot->getKey(),
                             'warehouse_id' => $warehouse->getKey(),
-                            'original_component_product_id' => $componentSnapshot->product_id,
-                            'original_component_name' => $componentSnapshot->product_name,
-                            'original_component_sku' => $componentSnapshot->product_sku,
+                            'original_component_product_id' => $componentSnapshot->original_product_id,
+                            'original_component_name' => $componentSnapshot->original_product_name,
+                            'original_component_sku' => $componentSnapshot->original_product_sku,
+                            'planned_component_product_id' => $componentSnapshot->product_id,
+                            'planned_component_name' => $componentSnapshot->product_name,
+                            'planned_component_sku' => $componentSnapshot->product_sku,
+                            'planned_unit_symbol' => $componentSnapshot->unit_symbol,
                             'unit_symbol' => $componentSnapshot->unit_symbol,
                             'required_quantity' => $pendingQuantity,
                             'regularized_quantity' => '0.000000',
@@ -228,7 +235,8 @@ class ConfirmSale
                 'branch', 'warehouse', 'confirmedBy.user', 'items.components',
                 'extraLines.extra', 'payments.paymentMethod', 'payments.receivedBy.user',
                 'stockMovementLinks.stockMovement.lines.product',
-                'inventoryPendings.originalComponent',
+                'inventoryPendings.originalComponent', 'inventoryPendings.plannedComponent',
+                'inventoryPendings.componentSnapshot',
             ]);
         }, attempts: 3);
     }
@@ -289,7 +297,7 @@ class ConfirmSale
     }
 
     /**
-     * @param  array<int, array{product: Product, quantity: int|float|string, customizations?: array<int, array{product: Product, quantity: int|float|string, unit_price_base?: int|float|string, note?: string|null}>}>  $lines
+     * @param  array<int, array{product: Product, quantity: int|float|string, component_overrides?: array<int, array{original_product_id: int, product: Product, quantity: int|float|string}>, customizations?: array<int, array{product: Product, quantity: int|float|string, unit_price_base?: int|float|string, note?: string|null}>}>  $lines
      * @return Collection<int, Collection<string, mixed>>
      */
     private function prepareItems(Company $company, Warehouse $warehouse, array $lines): Collection
@@ -340,9 +348,14 @@ class ConfirmSale
                 ->map(fn (array $customization): int => (int) $customization['product']->getKey())
                 ->all(),
         );
+        $overrideProductIds = $requested->flatMap(
+            fn (array $line): array => collect($line['component_overrides'] ?? [])
+                ->map(fn (array $override): int => (int) $override['product']->getKey())
+                ->all(),
+        );
         $componentIds = $recipes->flatMap(
             fn (ProductRecipe $recipe) => $recipe->items->pluck('component_product_id'),
-        )->merge($customProductIds)->unique()->sort()->values();
+        )->merge($customProductIds)->merge($overrideProductIds)->unique()->sort()->values();
         $componentProducts = Product::query()
             ->withoutGlobalScope('company')
             ->with('unit:id,symbol')
@@ -354,7 +367,7 @@ class ConfirmSale
             ->keyBy('id');
 
         if ($componentProducts->count() !== $componentIds->count()) {
-            throw new DomainException('Todos los insumos personalizados deben pertenecer a la empresa.');
+            throw new DomainException('Todos los insumos utilizados deben pertenecer a la empresa.');
         }
         $balances = StockBalance::query()
             ->withoutGlobalScope('company')
@@ -385,12 +398,38 @@ class ConfirmSale
             $subtotal = $this->money(bcmul($quantity, $product->sale_price_base, 8));
             $components = collect();
             $itemCost = '0.0000';
+            $overrides = collect($requestedByProduct->get($productId)['component_overrides'] ?? []);
+            $overrideOriginalIds = $overrides->map(fn (array $override): int => (int) $override['original_product_id']);
+            $recipeComponentIds = $recipe->items->pluck('component_product_id')->map(fn (int|string $id): int => (int) $id);
+
+            if ($overrideOriginalIds->duplicates()->isNotEmpty()
+                || $overrideOriginalIds->diff($recipeComponentIds)->isNotEmpty()) {
+                throw new DomainException('Cada sustitución debe corresponder una sola vez a un ingrediente de la receta activa.');
+            }
+
+            $overridesByOriginal = $overrides->keyBy(fn (array $override): int => (int) $override['original_product_id']);
 
             foreach ($recipe->items as $recipeItem) {
-                $component = $recipeItem->componentProduct;
-                $perUnit = bcdiv($recipeItem->quantity, $recipe->yield_quantity, 12);
-                $wasteMultiplier = bcadd('1', bcdiv($recipeItem->waste_percentage, '100', 12), 12);
-                $consumed = $this->quantity(bcmul(bcmul($perUnit, $wasteMultiplier, 12), $quantity, 12));
+                $originalComponent = $recipeItem->componentProduct;
+                $originalRequired = $this->requirementCalculator->calculate($recipe, $recipeItem, $quantity);
+                $override = $overridesByOriginal->get((int) $originalComponent->getKey());
+                $component = $override === null
+                    ? $originalComponent
+                    : $componentProducts->get((int) $override['product']->getKey());
+                $consumed = $override === null
+                    ? $originalRequired
+                    : Decimal::normalize($override['quantity'], 6);
+
+                if (! $component instanceof Product
+                    || ! $component->is_active
+                    || $component->is_sellable
+                    || $component->item_type !== ProductItemType::Physical
+                    || $component->inventory_behavior !== InventoryBehavior::Self
+                    || $component->unit_id !== $originalComponent->unit_id
+                    || bccomp($consumed, '0', 6) <= 0) {
+                    throw new DomainException('La sustitución requiere un insumo activo, inventariable, de la misma unidad y una cantidad positiva.');
+                }
+
                 $balance = $balances->get($component->getKey());
                 $unitCost = $this->inventory->currentUnitCost($component, $balance);
 
@@ -406,7 +445,12 @@ class ConfirmSale
                         : $consumed,
                     'has_known_cost' => ($requirements[$componentId]['has_known_cost'] ?? true) && $unitCost !== null,
                 ];
-                $components->put($componentId, [
+                $components->push([
+                    'source_key' => 'recipe:'.$recipeItem->getKey(),
+                    'original_product_id' => $originalComponent->getKey(),
+                    'original_product_name' => $originalComponent->name,
+                    'original_product_sku' => $originalComponent->sku,
+                    'original_unit_symbol' => $originalComponent->unit->symbol,
                     'product_id' => $componentId,
                     'product_name' => $component->name,
                     'product_sku' => $component->sku,
@@ -414,6 +458,8 @@ class ConfirmSale
                     'recipe_quantity' => $recipeItem->quantity,
                     'customization_quantity' => '0.000000',
                     'waste_percentage' => $recipeItem->waste_percentage,
+                    'original_quantity_required' => $originalRequired,
+                    'quantity_required' => $consumed,
                     'quantity_consumed' => $consumed,
                     'customization_quantity_consumed' => '0.000000',
                     'customization_unit_price_base' => '0.0000',
@@ -466,7 +512,14 @@ class ConfirmSale
                         : $customConsumed,
                     'has_known_cost' => ($requirements[$componentId]['has_known_cost'] ?? true) && $unitCost !== null,
                 ];
-                $snapshot = $components->get($componentId, [
+                $snapshotIndex = $components->search(fn (array $snapshot): bool => (int) $snapshot['product_id'] === $componentId
+                    && (int) $snapshot['original_product_id'] === $componentId);
+                $snapshot = $snapshotIndex === false ? [
+                    'source_key' => 'customization:'.$componentId,
+                    'original_product_id' => $componentId,
+                    'original_product_name' => $component->name,
+                    'original_product_sku' => $component->sku,
+                    'original_unit_symbol' => $component->unit->symbol,
                     'product_id' => $componentId,
                     'product_name' => $component->name,
                     'product_sku' => $component->sku,
@@ -474,6 +527,8 @@ class ConfirmSale
                     'recipe_quantity' => '0.000000',
                     'customization_quantity' => '0.000000',
                     'waste_percentage' => '0.000000',
+                    'original_quantity_required' => '0.000000',
+                    'quantity_required' => '0.000000',
                     'quantity_consumed' => '0.000000',
                     'customization_quantity_consumed' => '0.000000',
                     'customization_unit_price_base' => '0.0000',
@@ -482,18 +537,23 @@ class ConfirmSale
                     'unit_cost_base' => $unitCost === null ? null : $this->money($unitCost),
                     'total_cost_base' => $unitCost === null ? null : '0.0000',
                     'customization_total_cost_base' => $unitCost === null ? null : '0.0000',
-                ]);
+                ] : $components->get($snapshotIndex);
                 $snapshot['customization_quantity'] = $customQuantity;
                 $snapshot['customization_quantity_consumed'] = $customConsumed;
                 $snapshot['customization_unit_price_base'] = $customUnitPrice;
                 $snapshot['customization_total_price_base'] = $customPrice;
                 $snapshot['customization_note'] = $customizationNote;
+                $snapshot['quantity_required'] = bcadd($snapshot['quantity_required'], $customConsumed, 6);
                 $snapshot['quantity_consumed'] = bcadd($snapshot['quantity_consumed'], $customConsumed, 6);
                 $snapshot['customization_total_cost_base'] = $customCost;
                 $snapshot['total_cost_base'] = $snapshot['total_cost_base'] === null || $customCost === null
                     ? null
                     : $this->money(bcadd($snapshot['total_cost_base'], $customCost, 8));
-                $components->put($componentId, $snapshot);
+                if ($snapshotIndex === false) {
+                    $components->push($snapshot);
+                } else {
+                    $components->put($snapshotIndex, $snapshot);
+                }
             }
 
             $prepared->push(collect([

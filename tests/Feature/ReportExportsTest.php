@@ -7,6 +7,7 @@ use App\Enums\ExpenseStatus;
 use App\Enums\MembershipStatus;
 use App\Enums\ModuleCode;
 use App\Enums\PaymentStatus;
+use App\Enums\SaleOrderStatus;
 use App\Enums\SaleStatus;
 use App\Models\Expense;
 use App\Models\Membership;
@@ -61,7 +62,7 @@ test('owner exports complete professional xlsx and pdf reports', function () {
     expect($xlsx->baseResponse)->toBeInstanceOf(BinaryFileResponse::class);
     $spreadsheet = IOFactory::load($xlsx->baseResponse->getFile()->getPathname());
 
-    expect($spreadsheet->getSheetNames())->toBe(['Resumen', 'Ventas', 'Pedidos y reservas', 'Ramos', 'Extras vendidos', 'Inventario', 'Gastos', 'Ganancias'])
+    expect($spreadsheet->getSheetNames())->toBe(['Ventas', 'Pedidos y reservas', 'Ramos', 'Extras vendidos', 'Inventario', 'Gastos', 'Ganancias'])
         ->and($spreadsheet->getSheetByName('Ventas')?->getFreezePane())->not->toBeNull()
         ->and($spreadsheet->getSheetByName('Ventas')?->getAutoFilter()->getRange())->not->toBe('');
 
@@ -75,7 +76,7 @@ test('owner exports complete professional xlsx and pdf reports', function () {
         ->and($pdf->getContent())->toStartWith('%PDF');
 });
 
-test('pdf and xlsx include cash qr and total collection breakdowns', function () {
+test('pdf and xlsx include sale allocations separately from period collections', function () {
     $context = reportExportContext('Florería desglose cobros');
     $companyId = $context['membership']->company_id;
     $methods = PaymentMethod::query()->withoutGlobalScope('company')
@@ -105,7 +106,7 @@ test('pdf and xlsx include cash qr and total collection breakdowns', function ()
     );
     $pdfHtml = view('reports.pdf', compact('document'))->render();
 
-    expect($pdfHtml)->toContain('Cobros en efectivo', 'Cobros por QR', 'Total cobrado')
+    expect($pdfHtml)->toContain('Abonado a estas ventas', 'Efectivo recibido durante el período', 'QR recibido durante el período', 'Total cobrado durante el período')
         ->toContain('100,00', '200,00', '300,00');
 
     $xlsx = $this->actingAs($context['owner'])
@@ -115,9 +116,93 @@ test('pdf and xlsx include cash qr and total collection breakdowns', function ()
         ]))->assertOk();
     $values = workbookValues($xlsx->baseResponse);
 
-    expect($values)->toContain('Cobros en efectivo', 'Cobros por QR', 'Total cobrado')
+    expect($values)->toContain('Abonado a estas ventas', 'Efectivo recibido durante el período', 'QR recibido durante el período', 'Total cobrado durante el período')
         ->and(collect($values)->map(fn (string $value): float => (float) $value)->all())
         ->toContain(100.0, 200.0, 300.0);
+});
+
+test('sales detail allocates all sale payments by method regardless of payment date', function () {
+    $context = reportExportContext('Detalle de pagos mixtos');
+    $companyId = $context['membership']->company_id;
+    $methods = PaymentMethod::query()->withoutGlobalScope('company')
+        ->where('company_id', $companyId)->get()->keyBy('code');
+    $sale = Sale::factory()->create([
+        'company_id' => $companyId,
+        'confirmed_by_membership_id' => $context['membership']->getKey(),
+        'total_base' => 200,
+        'paid_total_base' => 180,
+        'balance_due_base' => 20,
+        'payment_status' => PaymentStatus::Partial,
+    ]);
+
+    foreach ([['cash', 50, now()], ['qr', 100, now()->addDays(2)], ['bank_transfer', 30, now()->subDays(2)]] as [$code, $amount, $occurredAt]) {
+        SalePayment::factory()->create([
+            'company_id' => $companyId,
+            'sale_id' => $sale->getKey(),
+            'payment_method_id' => $methods[$code]->getKey(),
+            'payment_method_name' => $methods[$code]->name,
+            'received_by_membership_id' => $context['membership']->getKey(),
+            'amount_base' => $amount,
+            'occurred_at' => $occurredAt,
+        ]);
+    }
+
+    $document = app(ReportExportData::class)->build(
+        $context['membership'], 'today', null, null, 'current', 'sales',
+    );
+    $row = $document['sections'][0]['rows'][0];
+
+    expect($row['total'])->toBe('200.0000')
+        ->and($row['cash_paid'])->toBe('50.0000')
+        ->and($row['qr_paid'])->toBe('100.0000')
+        ->and($row['other_paid'])->toBe('30.0000')
+        ->and($row['paid'])->toBe('180.0000')
+        ->and($row['balance'])->toBe('20.0000');
+});
+
+test('order status is validated preserved in exports and does not remove unrelated expenses', function () {
+    $context = reportExportContext('Exportación por estado');
+    foreach ([SaleOrderStatus::Delivered, SaleOrderStatus::Reserved] as $orderStatus) {
+        Sale::factory()->create([
+            'company_id' => $context['membership']->company_id,
+            'confirmed_by_membership_id' => $context['membership']->getKey(),
+            'number' => 'VENTA-'.$orderStatus->value,
+            'order_status' => $orderStatus,
+        ]);
+    }
+    Expense::factory()->create([
+        'company_id' => $context['membership']->company_id,
+        'membership_id' => $context['membership']->getKey(),
+        'concept' => 'Gasto no filtrado por pedido',
+        'status' => ExpenseStatus::Confirmed,
+    ]);
+
+    $response = $this->actingAs($context['owner'])
+        ->withSession(['current_membership_id' => $context['membership']->getKey()])
+        ->get(route('reports.export', [
+            'format' => 'xlsx',
+            'period' => 'today',
+            'scope' => 'full',
+            'section' => 'summary',
+            'order_status' => SaleOrderStatus::Delivered->value,
+        ]))->assertOk();
+    $values = workbookValues($response->baseResponse);
+    $text = implode('|', $values);
+
+    expect($text)->toContain('Estado del pedido: Entregado')
+        ->toContain('VENTA-delivered')
+        ->toContain('Gasto no filtrado por pedido')
+        ->not->toContain('VENTA-reserved');
+
+    $this->actingAs($context['owner'])
+        ->withSession(['current_membership_id' => $context['membership']->getKey()])
+        ->get(route('reports.export', [
+            'format' => 'xlsx',
+            'period' => 'today',
+            'scope' => 'current',
+            'section' => 'sales',
+            'order_status' => 'inventado',
+        ]))->assertSessionHasErrors('order_status');
 });
 
 test('current section export contains only the selected authorized sheet', function () {

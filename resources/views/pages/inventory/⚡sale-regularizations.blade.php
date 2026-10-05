@@ -81,7 +81,7 @@ new #[Title('Pendientes de regularización')] class extends Component
                 'branch:id,name',
                 'inventoryPendings' => fn ($query) => $query
                     ->when($status, fn ($pendingQuery) => $pendingQuery->where('status', $status))
-                    ->with('saleItem:id,product_name'),
+                    ->with(['saleItem:id,product_name', 'plannedComponent:id,name']),
             ])
             ->whereHas('inventoryPendings', fn (Builder $query) => $query
                 ->when($status, fn (Builder $pendingQuery) => $pendingQuery->where('status', $status)))
@@ -120,7 +120,7 @@ new #[Title('Pendientes de regularización')] class extends Component
                 <div class="grid gap-2 sm:grid-cols-2">
                     @foreach($sale->inventoryPendings as $pending)
                         <div class="flex items-center justify-between gap-3 rounded-lg bg-zinc-50 p-3 dark:bg-zinc-800/60" wire:key="pending-{{ $pending->id }}">
-                            <div><strong>{{ $pending->original_component_name }}</strong><flux:text size="sm">{{ $pending->saleItem->product_name }} · {{ $this->formatQuantity($pending->required_quantity) }} {{ $pending->unit_symbol }}</flux:text></div>
+                            <div><strong>{{ $pending->original_component_name }} @if($pending->planned_component_product_id && $pending->planned_component_product_id !== $pending->original_component_product_id)→ {{ $pending->planned_component_name }}@endif</strong><flux:text size="sm">{{ $pending->saleItem->product_name }} · {{ $this->formatQuantity($pending->required_quantity) }} {{ $pending->planned_unit_symbol ?? $pending->unit_symbol }}</flux:text></div>
                             @if($pending->status === SaleInventoryPendingStatus::Pending)<flux:button size="sm" variant="primary" :href="route('inventory.regularizations.show', $pending->id)" wire:navigate>Regularizar</flux:button>@elseif($pending->status === SaleInventoryPendingStatus::Completed)<flux:badge color="green">Completado</flux:badge>@else<flux:badge color="zinc">Cancelado</flux:badge>@endif
                         </div>
                     @endforeach

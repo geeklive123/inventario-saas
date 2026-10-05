@@ -1,6 +1,6 @@
 <?php
 
-use App\Actions\Sales\ConfirmSale;
+use App\Actions\Sales\ConfirmSaleOnce;
 use App\Actions\Sales\SaveSaleExtra;
 use App\Actions\Sales\SetSaleExtraStatus;
 use App\Enums\InventoryBehavior;
@@ -13,20 +13,27 @@ use App\Models\Branch;
 use App\Models\CompanyModule;
 use App\Models\PaymentMethod;
 use App\Models\Product;
+use App\Models\ProductRecipe;
 use App\Models\Sale;
 use App\Models\SaleExtra;
+use App\Models\StockBalance;
 use App\Models\Warehouse;
+use App\Services\Inventory\InventoryService;
 use App\Support\Authorization\CompanyAccess;
 use App\Support\Decimal;
 use App\Support\Tenancy\CurrentCompany;
+use App\Services\Sales\PotentialDuplicateSaleFinder;
+use App\Services\Sales\SaleComponentRequirementCalculator;
 use Carbon\CarbonImmutable;
 use Flux\Flux;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Number;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Livewire\Attributes\Computed;
+use Livewire\Attributes\Locked;
 use Livewire\Attributes\Title;
 use Livewire\Component;
 use Livewire\WithPagination;
@@ -49,7 +56,7 @@ new #[Title('Ventas')] class extends Component
 
     public ?int $warehouseId = null;
 
-    /** @var array<int, array{product_id: int|null, quantity: string, customizations: array<int, array{product_id: int|null, quantity: string, unit_price_base: string, note: string}>}> */
+    /** @var array<int, array{product_id: int|null, quantity: string, component_overrides: array<int, array{original_product_id: int, substitute_product_id: int|null, quantity: string}>, customizations: array<int, array{product_id: int|null, quantity: string, unit_price_base: string, note: string}>}> */
     public array $saleLines = [];
 
     /** @var array<int, array{payment_method_id: int|null, amount_base: string}> */
@@ -75,6 +82,19 @@ new #[Title('Ventas')] class extends Component
     public ?int $editingExtraId = null;
 
     public bool $showSaleModal = false;
+
+    #[Locked]
+    public string $saleAttemptToken = '';
+
+    #[Locked]
+    public string $duplicateWarningFingerprint = '';
+
+    #[Locked]
+    public string $approvedDuplicateFingerprint = '';
+
+    /** @var array{sale_id: int, number: string, relevant_at: string, customer: string, products: list<string>, status: string}|array{} */
+    #[Locked]
+    public array $potentialDuplicateSale = [];
 
     public function mount(): void
     {
@@ -102,7 +122,7 @@ new #[Title('Ventas')] class extends Component
         $this->customerName = '';
         $this->branchId = Branch::query()->where('is_active', true)->orderBy('name')->value('id');
         $this->selectDefaultWarehouse();
-        $this->saleLines = [['product_id' => null, 'quantity' => '1', 'customizations' => []]];
+        $this->saleLines = [['product_id' => null, 'quantity' => '1', 'component_overrides' => [], 'customizations' => []]];
         $this->paymentLines = [];
         $this->extraLines = [];
         $this->orderStatus = SaleOrderStatus::Reserved->value;
@@ -112,13 +132,48 @@ new #[Title('Ventas')] class extends Component
         $this->saleOccurredAt = $this->backdatedSalesEnabled
             ? now($companyTimezone)->format('Y-m-d\TH:i')
             : '';
+        $this->saleAttemptToken = Str::uuid()->toString();
+        $this->duplicateWarningFingerprint = '';
+        $this->approvedDuplicateFingerprint = '';
+        $this->potentialDuplicateSale = [];
         $this->showSaleModal = true;
         Flux::modal('new-sale')->show();
     }
 
     public function addSaleLine(): void
     {
-        $this->saleLines[] = ['product_id' => null, 'quantity' => '1', 'customizations' => []];
+        $this->saleLines[] = ['product_id' => null, 'quantity' => '1', 'component_overrides' => [], 'customizations' => []];
+    }
+
+    public function updatedSaleLines(mixed $value, string $key): void
+    {
+        if (! str_ends_with($key, '.product_id')) {
+            return;
+        }
+
+        $lineIndex = (int) explode('.', $key)[0];
+        $this->saleLines[$lineIndex]['component_overrides'] = [];
+    }
+
+    public function startComponentSubstitution(int $lineIndex, int $originalProductId): void
+    {
+        $ingredient = collect($this->saleLineIngredients[$lineIndex] ?? [])
+            ->firstWhere('original_product_id', $originalProductId);
+
+        if (! is_array($ingredient)) {
+            return;
+        }
+
+        $this->saleLines[$lineIndex]['component_overrides'][$originalProductId] = [
+            'original_product_id' => $originalProductId,
+            'substitute_product_id' => null,
+            'quantity' => $ingredient['original_quantity_required'],
+        ];
+    }
+
+    public function cancelComponentSubstitution(int $lineIndex, int $originalProductId): void
+    {
+        unset($this->saleLines[$lineIndex]['component_overrides'][$originalProductId]);
     }
 
     public function addCustomization(int $lineIndex): void
@@ -215,6 +270,15 @@ new #[Title('Ventas')] class extends Component
             'saleLines' => ['required', 'array', 'min:1'],
             'saleLines.*.product_id' => ['required', Rule::exists('products', 'id')->where('company_id', $companyId)],
             'saleLines.*.quantity' => ['required', 'numeric', 'gt:0'],
+            'saleLines.*.component_overrides' => ['array'],
+            'saleLines.*.component_overrides.*.original_product_id' => ['required', 'integer', Rule::exists('products', 'id')->where('company_id', $companyId)],
+            'saleLines.*.component_overrides.*.substitute_product_id' => ['required', 'integer', Rule::exists('products', 'id')
+                ->where('company_id', $companyId)
+                ->where('is_active', 1)
+                ->where('is_sellable', 0)
+                ->where('item_type', ProductItemType::Physical->value)
+                ->where('inventory_behavior', InventoryBehavior::Self->value)],
+            'saleLines.*.component_overrides.*.quantity' => ['required', 'numeric', 'decimal:0,6', 'gt:0'],
             'saleLines.*.customizations' => ['array'],
             'saleLines.*.customizations.*.product_id' => ['required', Rule::exists('products', 'id')
                 ->where('company_id', $companyId)
@@ -239,6 +303,8 @@ new #[Title('Ventas')] class extends Component
         ], messages: [
             'saleLines.*.product_id.required' => 'Selecciona un ramo.',
             'saleLines.*.quantity.gt' => 'La cantidad debe ser mayor que cero.',
+            'saleLines.*.component_overrides.*.substitute_product_id.required' => 'Selecciona el insumo sustituto.',
+            'saleLines.*.component_overrides.*.quantity.gt' => 'La cantidad del sustituto debe ser mayor que cero.',
             'paymentLines.*.payment_method_id.required' => 'Selecciona el método de pago.',
             'paymentLines.*.amount_base.gt' => 'El importe debe ser mayor que cero.',
             'deliveryAt.required' => 'Indica la fecha y hora de entrega de la reserva.',
@@ -251,20 +317,55 @@ new #[Title('Ventas')] class extends Component
             'id',
             collect($data['saleLines'])->flatMap(fn (array $line): array => collect($line['customizations'] ?? [])->pluck('product_id')->all()),
         )->get()->keyBy('id');
+        $overrideProducts = Product::query()->whereIn(
+            'id',
+            collect($data['saleLines'])->flatMap(fn (array $line): array => collect($line['component_overrides'] ?? [])->pluck('substitute_product_id')->all()),
+        )->get()->keyBy('id');
         $methods = PaymentMethod::query()->whereIn('id', collect($data['paymentLines'])->pluck('payment_method_id'))->get()->keyBy('id');
         $extras = SaleExtra::query()->whereIn('id', collect($data['extraLines'])->pluck('extra_id'))->get()->keyBy('id');
         $effectiveOccurredAt = $this->backdatedSalesEnabled && $data['saleDateMode'] === 'other'
             ? CarbonImmutable::parse($data['saleOccurredAt'], $company->timezone)->utc()
             : null;
+        $deliveryAt = $data['deliveryAt']
+            ? CarbonImmutable::parse($data['deliveryAt'], $company->timezone)->utc()
+            : null;
+        $fingerprint = hash('sha256', serialize($data));
+
+        if ($this->approvedDuplicateFingerprint !== $fingerprint) {
+            $duplicate = app(PotentialDuplicateSaleFinder::class)->find(
+                $company,
+                $data['customerName'],
+                $effectiveOccurredAt ?? CarbonImmutable::now($company->timezone)->utc(),
+                $deliveryAt,
+                collect($data['saleLines'])->pluck('product_id')->map(fn (int|string $id): int => (int) $id)->all(),
+            );
+
+            if ($duplicate !== null) {
+                $this->duplicateWarningFingerprint = $fingerprint;
+                $this->potentialDuplicateSale = [
+                    ...$duplicate,
+                    'relevant_at' => $duplicate['relevant_at']->format('d/m/Y H:i'),
+                ];
+                Flux::modal('potential-duplicate-sale')->show();
+
+                return;
+            }
+        }
 
         try {
-            $sale = app(ConfirmSale::class)->handle(
+            $sale = app(ConfirmSaleOnce::class)->handle(
+                $this->saleAttemptToken,
                 app(CurrentCompany::class)->membership(),
                 $branch,
                 $warehouse,
                 collect($data['saleLines'])->map(fn (array $line): array => [
                     'product' => $products->get($line['product_id']),
                     'quantity' => $line['quantity'],
+                    'component_overrides' => collect($line['component_overrides'] ?? [])->map(fn (array $override): array => [
+                        'original_product_id' => (int) $override['original_product_id'],
+                        'product' => $overrideProducts->get($override['substitute_product_id']),
+                        'quantity' => $override['quantity'],
+                    ])->values()->all(),
                     'customizations' => collect($line['customizations'] ?? [])->map(fn (array $customization): array => [
                         'product' => $customizationProducts->get($customization['product_id']),
                         'quantity' => $customization['quantity'],
@@ -284,9 +385,7 @@ new #[Title('Ventas')] class extends Component
                     'unit_price_base' => $line['unit_price_base'],
                 ])->all(),
                 SaleOrderStatus::from($data['orderStatus']),
-                $data['deliveryAt']
-                    ? CarbonImmutable::parse($data['deliveryAt'], $company->timezone)->utc()
-                    : null,
+                $deliveryAt,
             );
         } catch (\DomainException $exception) {
             $this->addError('sale', $exception->getMessage());
@@ -294,9 +393,38 @@ new #[Title('Ventas')] class extends Component
             return;
         }
 
+        $this->duplicateWarningFingerprint = '';
+        $this->approvedDuplicateFingerprint = '';
+        $this->potentialDuplicateSale = [];
         Flux::modal('new-sale')->close();
         Flux::toast(variant: 'success', text: "Venta {$sale->number} confirmada.");
         $this->redirectRoute('sales.show', ['saleId' => $sale->getKey()], navigate: true);
+    }
+
+    public function continuePotentialDuplicateSale(): void
+    {
+        Gate::authorize('create', Sale::class);
+
+        if ($this->duplicateWarningFingerprint === '' || $this->potentialDuplicateSale === []) {
+            $this->addError('sale', 'La advertencia de posible duplicado ya no está vigente. Revisa el formulario.');
+
+            return;
+        }
+
+        $this->approvedDuplicateFingerprint = $this->duplicateWarningFingerprint;
+        Flux::modal('potential-duplicate-sale')->close();
+        $this->confirmSale();
+    }
+
+    public function cancelPotentialDuplicateSale(): void
+    {
+        Gate::authorize('create', Sale::class);
+        $this->duplicateWarningFingerprint = '';
+        $this->approvedDuplicateFingerprint = '';
+        $this->potentialDuplicateSale = [];
+        $this->showSaleModal = false;
+        Flux::modal('potential-duplicate-sale')->close();
+        Flux::modal('new-sale')->close();
     }
 
     public function formatMoney(int|float|string $amount): string
@@ -374,6 +502,91 @@ new #[Title('Ventas')] class extends Component
             ->where('inventory_behavior', InventoryBehavior::Self)
             ->orderBy('name')
             ->get();
+    }
+
+    /**
+     * @return array<int, list<array<string, mixed>>>
+     */
+    #[Computed]
+    public function saleLineIngredients(): array
+    {
+        $productIds = collect($this->saleLines)
+            ->pluck('product_id')
+            ->filter()
+            ->map(fn (int|string $id): int => (int) $id)
+            ->unique()
+            ->values();
+
+        if ($productIds->isEmpty()) {
+            return [];
+        }
+
+        $recipes = ProductRecipe::query()
+            ->with(['items.componentProduct.unit:id,symbol'])
+            ->whereIn('product_id', $productIds)
+            ->where('active_slot', 1)
+            ->get()
+            ->keyBy('product_id');
+        $supplies = $this->supplies->keyBy('id');
+        $balances = $this->warehouseId === null
+            ? collect()
+            : StockBalance::query()
+                ->where('warehouse_id', $this->warehouseId)
+                ->whereIn('product_id', $supplies->modelKeys())
+                ->get()
+                ->keyBy('product_id');
+        $canViewCosts = app(CompanyAccess::class)->allowsCurrent(auth()->user(), 'sales.costs.view', false);
+
+        return collect($this->saleLines)->mapWithKeys(function (array $line, int $lineIndex) use ($balances, $canViewCosts, $recipes, $supplies): array {
+            $recipe = $recipes->get((int) ($line['product_id'] ?? 0));
+
+            if (! $recipe instanceof ProductRecipe
+                || ! is_numeric($line['quantity'] ?? null)
+                || bccomp(Decimal::normalize($line['quantity'], 6), '0', 6) <= 0) {
+                return [$lineIndex => []];
+            }
+
+            $overrides = collect($line['component_overrides'] ?? [])->keyBy('original_product_id');
+            $ingredients = $recipe->items->map(function ($recipeItem) use ($balances, $canViewCosts, $line, $overrides, $recipe, $supplies): array {
+                $original = $recipeItem->componentProduct;
+                $originalRequired = app(SaleComponentRequirementCalculator::class)->calculate(
+                    $recipe,
+                    $recipeItem,
+                    $line['quantity'],
+                );
+                $override = $overrides->get((int) $original->getKey());
+                $substitute = is_array($override)
+                    ? $supplies->get((int) ($override['substitute_product_id'] ?? 0))
+                    : null;
+                $planned = $substitute instanceof Product ? $substitute : $original;
+                $plannedQuantity = is_array($override) && is_numeric($override['quantity'] ?? null)
+                    ? Decimal::normalize($override['quantity'], 6)
+                    : $originalRequired;
+                $balance = $balances->get($planned->getKey());
+                $available = $balance instanceof StockBalance ? $balance->quantity : '0.000000';
+                $unitCost = $canViewCosts
+                    ? app(InventoryService::class)->currentUnitCost($planned, $balance instanceof StockBalance ? $balance : null)
+                    : null;
+
+                return [
+                    'original_product_id' => (int) $original->getKey(),
+                    'original_name' => $original->name,
+                    'original_sku' => $original->sku,
+                    'unit_id' => $original->unit_id,
+                    'unit_symbol' => $original->unit->symbol,
+                    'original_quantity_required' => $originalRequired,
+                    'has_override' => is_array($override),
+                    'substitute_product_id' => $substitute?->getKey(),
+                    'substitute_name' => $substitute?->name,
+                    'planned_quantity' => $plannedQuantity,
+                    'available_quantity' => $available,
+                    'sufficient' => bccomp($available, $plannedQuantity, 6) >= 0,
+                    'unit_cost_base' => $unitCost,
+                ];
+            })->values()->all();
+
+            return [$lineIndex => $ingredients];
+        })->all();
     }
 
     #[Computed]
@@ -657,7 +870,7 @@ new #[Title('Ventas')] class extends Component
             <form wire:submit="confirmSale" class="space-y-6">
                 <div><flux:heading size="lg">Nueva venta</flux:heading><flux:text>Selecciona los ramos, confirma el pago y el sistema descontará sus insumos.</flux:text></div>
                 @error('sale')<flux:callout variant="danger" icon="x-circle" heading="No se pudo confirmar la venta"><div class="whitespace-pre-line">{{ $message }}</div></flux:callout>@enderror
-                <div class="grid gap-4 md:grid-cols-4"><flux:input wire:model="customerName" label="Cliente (opcional)" placeholder="Consumidor final" /><flux:select wire:model.live="branchId" label="Sucursal" required>@foreach($this->branches as $branch)<flux:select.option :value="$branch->id">{{ $branch->name }}</flux:select.option>@endforeach</flux:select><flux:select wire:model="warehouseId" label="Almacén" required>@foreach($this->warehouses as $warehouse)<flux:select.option :value="$warehouse->id">{{ $warehouse->name }}</flux:select.option>@endforeach</flux:select><flux:select wire:model.live="orderStatus" label="Estado del pedido" required>@foreach(SaleOrderStatus::cases() as $state)@if($state !== SaleOrderStatus::Cancelled)<flux:select.option :value="$state->value">{{ $state->label() }}</flux:select.option>@endif @endforeach</flux:select></div>
+                <div class="grid gap-4 md:grid-cols-4"><flux:input wire:model="customerName" label="Cliente / celular (opcional)" placeholder="Nombre o celular" /><flux:select wire:model.live="branchId" label="Sucursal" required>@foreach($this->branches as $branch)<flux:select.option :value="$branch->id">{{ $branch->name }}</flux:select.option>@endforeach</flux:select><flux:select wire:model="warehouseId" label="Almacén" required>@foreach($this->warehouses as $warehouse)<flux:select.option :value="$warehouse->id">{{ $warehouse->name }}</flux:select.option>@endforeach</flux:select><flux:select wire:model.live="orderStatus" label="Estado del pedido" required>@foreach(SaleOrderStatus::cases() as $state)@if($state !== SaleOrderStatus::Cancelled)<flux:select.option :value="$state->value">{{ $state->label() }}</flux:select.option>@endif @endforeach</flux:select></div>
                 @if($this->backdatedSalesEnabled)<flux:card class="space-y-4 bg-zinc-50 dark:bg-zinc-800/60"><div><flux:heading size="sm">Fecha de la venta</flux:heading><flux:text size="sm">Puedes registrar ventas de hoy o hasta {{ CompanyModule::BACKDATED_SALES_MAXIMUM_DAYS }} días calendario atrás.</flux:text></div><flux:radio.group wire:model.live="saleDateMode"><flux:radio value="today" label="Hoy" /><flux:radio value="other" label="Otra fecha" /></flux:radio.group>@if($saleDateMode === 'other')<flux:input wire:model="saleOccurredAt" type="datetime-local" label="Fecha y hora de la venta" :min="$this->minimumBackdatedSaleAt" :max="$this->maximumBackdatedSaleAt" required /><flux:callout icon="information-circle" heading="Esta venta se registrará con una fecha anterior."><div>Los pagos iniciales usarán esta misma fecha y hora.</div></flux:callout>@endif</flux:card>@endif
                 @if($orderStatus === SaleOrderStatus::Reserved->value)<flux:input wire:model="deliveryAt" type="datetime-local" label="Fecha y hora de entrega" description="Obligatoria para pedidos reservados." required />@endif
 
@@ -665,6 +878,56 @@ new #[Title('Ventas')] class extends Component
                     @foreach($saleLines as $index => $line)
                         @php($summary = collect($this->summaryLines)->firstWhere('name', optional($this->bouquets->firstWhere('id', $line['product_id']))->name))
                         <flux:card class="space-y-4" wire:key="sale-line-{{ $index }}"><div class="grid items-end gap-3 md:grid-cols-[2fr_1fr_1fr_1fr_auto]"><flux:select wire:model.live="saleLines.{{ $index }}.product_id" label="Ramo" required><flux:select.option value="">Seleccionar ramo</flux:select.option>@foreach($this->bouquets as $bouquet)<flux:select.option :value="$bouquet->id">{{ $bouquet->name }}</flux:select.option>@endforeach</flux:select><flux:input wire:model.live.debounce.250ms="saleLines.{{ $index }}.quantity" type="number" min="0.000001" step="0.000001" label="Cantidad" required /><div><flux:text size="sm">Precio unitario</flux:text><div class="mt-2 font-semibold">{{ $currency->symbol }} {{ $this->formatMoney(optional($this->bouquets->firstWhere('id', $line['product_id']))->sale_price_base ?? 0) }}</div></div><div><flux:text size="sm">Subtotal</flux:text><div class="mt-2 font-semibold">{{ $currency->symbol }} {{ $this->formatMoney($summary['subtotal_base'] ?? 0) }}</div></div><flux:button type="button" variant="ghost" icon="trash" wire:click="removeSaleLine({{ $index }})" :disabled="count($saleLines) === 1" aria-label="Quitar ramo" /></div><div class="rounded-lg bg-zinc-50 p-3 dark:bg-zinc-800/60"><div class="flex items-center justify-between gap-3"><div><flux:heading size="sm">Personalización del ramo</flux:heading><flux:text size="sm">Agrega insumos adicionales por cada ramo de esta línea. La receta original no cambiará.</flux:text></div><flux:button type="button" size="sm" variant="subtle" icon="plus" wire:click="addCustomization({{ $index }})">Agregar insumo</flux:button></div>@foreach(($line['customizations'] ?? []) as $customizationIndex => $customization)<div class="mt-3 grid items-end gap-3 rounded-lg border border-zinc-200 p-3 md:grid-cols-[2fr_1fr_1fr_auto] dark:border-zinc-700" wire:key="customization-{{ $index }}-{{ $customizationIndex }}"><flux:select wire:model.live="saleLines.{{ $index }}.customizations.{{ $customizationIndex }}.product_id" label="Insumo adicional" required><flux:select.option value="">Seleccionar</flux:select.option>@foreach($this->supplies as $supply)<flux:select.option :value="$supply->id">{{ $supply->name }} · {{ $supply->unit->symbol }}</flux:select.option>@endforeach</flux:select><flux:input wire:model.live.debounce.250ms="saleLines.{{ $index }}.customizations.{{ $customizationIndex }}.quantity" type="number" min="0.000001" step="0.000001" label="Cantidad por ramo" required /><flux:input wire:model.live.debounce.250ms="saleLines.{{ $index }}.customizations.{{ $customizationIndex }}.unit_price_base" type="number" min="0" step="0.0001" label="Precio unitario ({{ $currency->symbol }})" description="Importe que se cobrará al cliente por cada unidad adicional." required /><flux:button type="button" variant="ghost" icon="trash" wire:click="removeCustomization({{ $index }}, {{ $customizationIndex }})" aria-label="Quitar personalización" /><flux:textarea wire:model="saleLines.{{ $index }}.customizations.{{ $customizationIndex }}.note" label="Observación (opcional)" placeholder="Ej.: Cartera corazón roja" maxlength="500" rows="2" class="md:col-span-3" /></div>@endforeach</div></flux:card>
+                        @php($ingredients = $this->saleLineIngredients[$index] ?? [])
+                        @if($ingredients !== [])
+                            <flux:card class="space-y-3 bg-zinc-50 dark:bg-zinc-800/60">
+                                <div>
+                                    <flux:heading size="sm">Ingredientes de la receta</flux:heading>
+                                    <flux:text size="sm">Puedes sustituir un ingrediente solo para esta línea. La receta maestra no cambiará.</flux:text>
+                                </div>
+                                @foreach($ingredients as $ingredient)
+                                    @php($overrideKey = $ingredient['original_product_id'])
+                                    <div class="space-y-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-700" wire:key="ingredient-{{ $index }}-{{ $overrideKey }}">
+                                        <div class="flex flex-wrap items-center justify-between gap-3">
+                                            <div>
+                                                <div class="font-medium">
+                                                    {{ $ingredient['original_name'] }}
+                                                    @if($ingredient['has_override'])
+                                                        <span class="text-amber-700 dark:text-amber-300">→ {{ $ingredient['substitute_name'] ?: 'Selecciona un sustituto' }}</span>
+                                                    @endif
+                                                </div>
+                                                <flux:text size="sm">
+                                                    Requerido: {{ $this->formatQuantity($ingredient['original_quantity_required']) }} {{ $ingredient['unit_symbol'] }}
+                                                    · Planificado: {{ $this->formatQuantity($ingredient['planned_quantity']) }} {{ $ingredient['unit_symbol'] }}
+                                                    · Stock: {{ $this->formatQuantity($ingredient['available_quantity']) }} {{ $ingredient['unit_symbol'] }}
+                                                    @if($ingredient['unit_cost_base'] !== null)
+                                                        · Costo prom.: {{ $currency->symbol }} {{ $this->formatMoney($ingredient['unit_cost_base']) }}
+                                                    @endif
+                                                </flux:text>
+                                            </div>
+                                            <div class="flex items-center gap-2">
+                                                <flux:badge :color="$ingredient['sufficient'] ? 'green' : 'amber'">{{ $ingredient['sufficient'] ? 'Stock suficiente' : 'Quedará pendiente' }}</flux:badge>
+                                                @if(! $ingredient['has_override'])
+                                                    <flux:button type="button" size="sm" variant="subtle" wire:click="startComponentSubstitution({{ $index }}, {{ $overrideKey }})">Cambiar ingrediente</flux:button>
+                                                @endif
+                                            </div>
+                                        </div>
+                                        @if($ingredient['has_override'])
+                                            <div class="grid items-end gap-3 md:grid-cols-[2fr_1fr_auto]">
+                                                <flux:select wire:model.live="saleLines.{{ $index }}.component_overrides.{{ $overrideKey }}.substitute_product_id" label="Usar en este pedido" required>
+                                                    <flux:select.option value="">Seleccionar sustituto</flux:select.option>
+                                                    @foreach($this->supplies->where('unit_id', $ingredient['unit_id']) as $supply)
+                                                        <flux:select.option :value="$supply->id">{{ $supply->name }} · {{ $supply->unit->symbol }}</flux:select.option>
+                                                    @endforeach
+                                                </flux:select>
+                                                <flux:input wire:model.live.debounce.250ms="saleLines.{{ $index }}.component_overrides.{{ $overrideKey }}.quantity" type="number" min="0.000001" step="0.000001" label="Cantidad total" description="Cantidad real para toda esta línea." required />
+                                                <flux:button type="button" variant="ghost" wire:click="cancelComponentSubstitution({{ $index }}, {{ $overrideKey }})">Usar original</flux:button>
+                                            </div>
+                                        @endif
+                                    </div>
+                                @endforeach
+                            </flux:card>
+                        @endif
                     @endforeach
                 </div>
 
@@ -672,8 +935,31 @@ new #[Title('Ventas')] class extends Component
 
                 <div class="grid gap-6 lg:grid-cols-2"><div class="space-y-3"><div class="flex items-center justify-between"><div><flux:heading size="sm">Pago inicial (opcional)</flux:heading><flux:text size="sm">{{ $this->canRegisterPayments ? 'Puedes dejar la venta pendiente o cobrar una parte.' : 'La venta quedará pendiente; no tienes permiso para registrar cobros.' }}</flux:text></div>@if($this->canRegisterPayments)<flux:button type="button" size="sm" icon="plus" wire:click="addPaymentLine">Agregar pago</flux:button>@endif</div>@foreach($paymentLines as $index => $payment)<div class="grid items-end gap-3 sm:grid-cols-[1fr_1fr_auto]" wire:key="payment-line-{{ $index }}"><flux:select wire:model="paymentLines.{{ $index }}.payment_method_id" label="Método" required><flux:select.option value="">Seleccionar</flux:select.option>@foreach($this->paymentMethods as $method)<flux:select.option :value="$method->id">{{ $method->name }}</flux:select.option>@endforeach</flux:select><flux:input wire:model.live.debounce.250ms="paymentLines.{{ $index }}.amount_base" type="number" min="0.0001" step="0.0001" label="Importe" required><x-slot name="append"><flux:button type="button" size="sm" variant="subtle" wire:click="fillRemainingPayment({{ $index }})">Completar</flux:button></x-slot></flux:input><flux:button type="button" variant="ghost" icon="trash" wire:click="removePaymentLine({{ $index }})" /></div>@endforeach</div>
                     <flux:card class="space-y-3 bg-zinc-50 dark:bg-zinc-800/60"><flux:heading size="sm">Resumen</flux:heading>@foreach($this->summaryLines as $line)<div><div class="flex justify-between gap-3"><span>{{ $line['name'] }} · {{ $this->formatQuantity($line['quantity']) }} × {{ $currency->symbol }} {{ $this->formatMoney($line['unit_price_base']) }}</span><strong>{{ $currency->symbol }} {{ $this->formatMoney($line['base_subtotal_base']) }}</strong></div>@foreach($line['customizations'] as $customization)<div class="flex justify-between gap-3 ps-4 text-sm text-zinc-600 dark:text-zinc-300"><span>+ {{ $customization['name'] }} · {{ $this->formatQuantity($customization['quantity']) }} por ramo × {{ $currency->symbol }} {{ $this->formatMoney($customization['unit_price_base']) }}</span><strong>{{ $currency->symbol }} {{ $this->formatMoney($customization['subtotal_base']) }}</strong></div>@endforeach</div>@endforeach @foreach($this->extraSummaryLines as $line)<div class="flex justify-between gap-3"><span>{{ $line['name'] }} · {{ $this->formatQuantity($line['quantity']) }} × {{ $currency->symbol }} {{ $this->formatMoney($line['unit_price_base']) }}</span><strong>{{ $currency->symbol }} {{ $this->formatMoney($line['subtotal_base']) }}</strong></div>@endforeach<div class="flex justify-between border-t border-zinc-200 pt-3 text-lg dark:border-zinc-700"><strong>Total</strong><strong>{{ $currency->symbol }} {{ $this->formatMoney($this->total) }}</strong></div><div class="flex justify-between"><span>Pagado ahora</span><span>{{ $currency->symbol }} {{ $this->formatMoney($this->paidTotal) }}</span></div><div class="flex justify-between"><span>Saldo pendiente</span><strong>{{ $currency->symbol }} {{ $this->formatMoney(max(0, (float) $this->total - (float) $this->paidTotal)) }}</strong></div>@if(bccomp($this->paidTotal, $this->total, 4) === 1)<flux:text class="text-red-600 dark:text-red-400">El pago no puede superar el total.</flux:text>@endif</flux:card></div>
-                <div class="flex justify-end gap-3"><flux:modal.close><flux:button variant="ghost">Cancelar</flux:button></flux:modal.close><flux:button type="submit" variant="primary" :disabled="bccomp($this->total, '0', 4) <= 0 || bccomp($this->paidTotal, $this->total, 4) === 1">Confirmar venta</flux:button></div>
+                <div class="flex justify-end gap-3"><flux:modal.close><flux:button variant="ghost">Cancelar</flux:button></flux:modal.close><flux:button type="submit" variant="primary" wire:loading.attr="disabled" wire:target="confirmSale" :disabled="bccomp($this->total, '0', 4) <= 0 || bccomp($this->paidTotal, $this->total, 4) === 1"><span wire:loading.remove wire:target="confirmSale">Confirmar venta</span><span wire:loading wire:target="confirmSale">Guardando...</span></flux:button></div>
             </form>
+        </flux:modal>
+
+        <flux:modal name="potential-duplicate-sale" class="max-w-xl">
+            @if($potentialDuplicateSale !== [])
+                <div class="space-y-5">
+                    <div><flux:heading size="lg">Posible venta duplicada</flux:heading><flux:text>Ya existe una venta para este celular, esta fecha y al menos uno de los ramos seleccionados.</flux:text></div>
+                    <flux:callout variant="warning" icon="exclamation-triangle" heading="Revisa antes de continuar">
+                        <div class="space-y-1">
+                            <div><strong>Venta:</strong> {{ $potentialDuplicateSale['number'] }}</div>
+                            <div><strong>Fecha del pedido:</strong> {{ $potentialDuplicateSale['relevant_at'] }}</div>
+                            <div><strong>Cliente / celular:</strong> {{ $potentialDuplicateSale['customer'] }}</div>
+                            <div><strong>Ramo coincidente:</strong> {{ implode(', ', $potentialDuplicateSale['products']) }}</div>
+                            <div><strong>Estado:</strong> {{ $potentialDuplicateSale['status'] }}</div>
+                        </div>
+                    </flux:callout>
+                    <div class="flex flex-wrap justify-end gap-3">
+                        <flux:button variant="ghost" wire:click="cancelPotentialDuplicateSale">Cancelar nuevo registro</flux:button>
+                        <flux:button variant="subtle" :href="route('sales.show', ['saleId' => $potentialDuplicateSale['sale_id']])" target="_blank">Ver venta</flux:button>
+                        <flux:modal.close><flux:button variant="subtle">Volver y revisar</flux:button></flux:modal.close>
+                        <flux:button variant="primary" wire:click="continuePotentialDuplicateSale" wire:loading.attr="disabled" wire:target="continuePotentialDuplicateSale"><span wire:loading.remove wire:target="continuePotentialDuplicateSale">Continuar de todas formas</span><span wire:loading wire:target="continuePotentialDuplicateSale">Guardando...</span></flux:button>
+                    </div>
+                </div>
+            @endif
         </flux:modal>
     @endif
 

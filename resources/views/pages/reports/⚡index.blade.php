@@ -1,8 +1,10 @@
 <?php
 
+use App\Enums\SaleOrderStatus;
 use App\Services\Reports\BusinessReports;
 use App\Support\Tenancy\CurrentCompany;
 use Illuminate\Support\Number;
+use Illuminate\Validation\Rule;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Title;
 use Livewire\Component;
@@ -14,6 +16,8 @@ new #[Title('Reportes')] class extends Component
     public string $dateFrom = '';
 
     public string $dateTo = '';
+
+    public string $orderStatus = '';
 
     public string $exportScope = 'current';
 
@@ -42,6 +46,12 @@ new #[Title('Reportes')] class extends Component
         $this->validateDates();
     }
 
+    public function updatedOrderStatus(): void
+    {
+        $this->validateOnly('orderStatus', ['orderStatus' => ['nullable', Rule::enum(SaleOrderStatus::class)]]);
+        unset($this->report);
+    }
+
     /** @return array<string, mixed> */
     #[Computed]
     public function report(): array
@@ -51,6 +61,7 @@ new #[Title('Reportes')] class extends Component
             $this->period,
             $this->dateFrom,
             $this->dateTo,
+            $this->orderStatus,
         );
     }
 
@@ -83,6 +94,7 @@ new #[Title('Reportes')] class extends Component
             'date_to' => $this->period === 'custom' ? $this->dateTo : null,
             'scope' => $this->exportScope,
             'section' => $this->exportSection,
+            'order_status' => $this->orderStatus !== '' ? $this->orderStatus : null,
         ]);
     }
 
@@ -106,12 +118,18 @@ new #[Title('Reportes')] class extends Component
             <flux:heading size="xl">Reportes</flux:heading>
             <flux:text>Entiende cómo se movieron tus ventas, insumos y gastos en el período elegido.</flux:text>
         </div>
-        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <flux:select wire:model.live="period" label="Período">
                 <flux:select.option value="today">Hoy</flux:select.option>
                 <flux:select.option value="week">Esta semana</flux:select.option>
                 <flux:select.option value="month">Este mes</flux:select.option>
                 <flux:select.option value="custom">Rango personalizado</flux:select.option>
+            </flux:select>
+            <flux:select wire:model.live="orderStatus" label="Estado del pedido">
+                <flux:select.option value="">Todos</flux:select.option>
+                @foreach(SaleOrderStatus::cases() as $status)
+                    <flux:select.option :value="$status->value">{{ $status->label() }}</flux:select.option>
+                @endforeach
             </flux:select>
             @if ($period === 'custom')
                 <flux:input wire:model.live.blur="dateFrom" type="date" label="Desde" />
@@ -135,7 +153,8 @@ new #[Title('Reportes')] class extends Component
             @endif
             @if ($capabilities['financial'])
                 <flux:card><flux:text>Total vendido</flux:text><div class="mt-2 text-2xl font-semibold">{{ $this->money($report['general']['total_sold_base']) }}</div><flux:text size="sm" class="mt-1">Valor completo de las ventas confirmadas, aunque aún tengan saldo.</flux:text></flux:card>
-                <flux:card><flux:text>Dinero cobrado</flux:text><div class="mt-2 text-2xl font-semibold text-green-700 dark:text-green-400">{{ $this->money($report['general']['collected_base']) }}</div><flux:text size="sm" class="mt-1">Pagos realmente recibidos durante este período.</flux:text></flux:card>
+                <flux:card><flux:text>Abonado a estas ventas</flux:text><div class="mt-2 text-2xl font-semibold text-blue-700 dark:text-blue-400">{{ $this->money($report['general']['paid_to_period_sales_base']) }}</div><flux:text size="sm" class="mt-1">Total abonado a las ventas que pertenecen al período, sin importar cuándo se pagaron.</flux:text></flux:card>
+                <flux:card><flux:text>Total cobrado durante el período</flux:text><div class="mt-2 text-2xl font-semibold text-green-700 dark:text-green-400">{{ $this->money($report['general']['collected_base']) }}</div><flux:text size="sm" class="mt-1">Pagos realmente recibidos durante este período, aunque correspondan a ventas de otras fechas.</flux:text></flux:card>
                 <flux:card><flux:text>Pendiente por cobrar</flux:text><div class="mt-2 text-2xl font-semibold text-amber-700 dark:text-amber-400">{{ $this->money($report['general']['pending_base']) }}</div><flux:text size="sm" class="mt-1">Saldo actual de las ventas realizadas en este período.</flux:text></flux:card>
                 <flux:card><flux:text>Costo de ramos vendidos</flux:text><div class="mt-2 text-2xl font-semibold">{{ $this->money($report['general']['historical_cost_base']) }}</div><flux:text size="sm" class="mt-1">Cuánto costaron los insumos utilizados en los ramos vendidos durante este período.</flux:text></flux:card>
                 <flux:card class="ring-1 ring-green-200 dark:ring-green-900"><flux:text>Resultado estimado</flux:text><div class="mt-2 text-2xl font-semibold">{{ $this->money($report['general']['estimated_result_base']) }}</div><flux:text size="sm" class="mt-1">Ventas menos costo de los ramos y gastos registrados.</flux:text></flux:card>
@@ -148,20 +167,26 @@ new #[Title('Reportes')] class extends Component
 
     @if ($report['sales'])
         <section class="space-y-4">
-            <div><flux:heading size="lg">Ventas</flux:heading><flux:text>Actividad comercial confirmada y ventas anuladas por separado.</flux:text></div>
+            <div><flux:heading size="lg">Ventas del período</flux:heading><flux:text>Ventas confirmadas cuya fecha efectiva pertenece al rango seleccionado.</flux:text></div>
             <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                 <flux:card><flux:text>Número de ventas</flux:text><div class="mt-2 text-xl font-semibold">{{ $report['sales']['count'] }}</div></flux:card>
                 <flux:card><flux:text>Ventas anuladas</flux:text><div class="mt-2 text-xl font-semibold">{{ $report['sales']['voided_count'] }}</div></flux:card>
                 @if ($capabilities['financial'])
-                    <flux:card><flux:text>Monto vendido</flux:text><div class="mt-2 text-xl font-semibold">{{ $this->money($report['sales']['total_sold_base']) }}</div></flux:card>
-                    <flux:card><flux:text>Cobros en efectivo</flux:text><div class="mt-2 text-xl font-semibold text-green-700 dark:text-green-400">{{ $this->money($report['sales']['cash_collected_base']) }}</div><flux:text size="sm">Pagos recibidos mediante el método Efectivo.</flux:text></flux:card>
-                    <flux:card><flux:text>Cobros por QR</flux:text><div class="mt-2 text-xl font-semibold text-blue-700 dark:text-blue-400">{{ $this->money($report['sales']['qr_collected_base']) }}</div><flux:text size="sm">Pagos recibidos mediante QR.</flux:text></flux:card>
-                    @if(bccomp($report['sales']['other_collected_base'], '0', 4) === 1)<flux:card><flux:text>Otros métodos</flux:text><div class="mt-2 text-xl font-semibold">{{ $this->money($report['sales']['other_collected_base']) }}</div><flux:text size="sm">Transferencias u otras formas de pago.</flux:text></flux:card>@endif
-                    <flux:card class="ring-1 ring-green-200 dark:ring-green-900"><flux:text>Total cobrado</flux:text><div class="mt-2 text-xl font-semibold">{{ $this->money($report['sales']['collected_base']) }}</div><flux:text size="sm">Suma de todos los pagos reales del período.</flux:text></flux:card>
-                    <flux:card><flux:text>Saldo pendiente</flux:text><div class="mt-2 text-xl font-semibold">{{ $this->money($report['sales']['pending_base']) }}</div></flux:card>
+                    <flux:card><flux:text>Total vendido</flux:text><div class="mt-2 text-xl font-semibold">{{ $this->money($report['sales']['total_sold_base']) }}</div></flux:card>
+                    <flux:card><flux:text>Abonado a estas ventas</flux:text><div class="mt-2 text-xl font-semibold text-blue-700 dark:text-blue-400">{{ $this->money($report['sales']['paid_to_period_sales_base']) }}</div></flux:card>
+                    <flux:card><flux:text>Saldo pendiente</flux:text><div class="mt-2 text-xl font-semibold text-amber-700 dark:text-amber-400">{{ $this->money($report['sales']['pending_base']) }}</div></flux:card>
                     <flux:card><flux:text>Ticket promedio</flux:text><div class="mt-2 text-xl font-semibold">{{ $report['sales']['average_ticket_base'] === null ? '—' : $this->money($report['sales']['average_ticket_base']) }}</div></flux:card>
                 @endif
             </div>
+            @if ($capabilities['financial'])
+                <div><flux:heading>Movimiento de dinero del período</flux:heading><flux:text>Pagos efectivamente recibidos dentro del rango, incluso si pertenecen a ventas de otras fechas.</flux:text></div>
+                <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    <flux:card><flux:text>Cobros en efectivo</flux:text><div class="mt-2 text-xl font-semibold text-green-700 dark:text-green-400">{{ $this->money($report['sales']['cash_collected_base']) }}</div><flux:text size="sm">Pagos recibidos mediante el método Efectivo.</flux:text></flux:card>
+                    <flux:card><flux:text>Cobros por QR</flux:text><div class="mt-2 text-xl font-semibold text-blue-700 dark:text-blue-400">{{ $this->money($report['sales']['qr_collected_base']) }}</div><flux:text size="sm">Pagos recibidos mediante QR.</flux:text></flux:card>
+                    @if(bccomp($report['sales']['other_collected_base'], '0', 4) === 1)<flux:card><flux:text>Otros métodos</flux:text><div class="mt-2 text-xl font-semibold">{{ $this->money($report['sales']['other_collected_base']) }}</div><flux:text size="sm">Transferencias u otras formas de pago.</flux:text></flux:card>@endif
+                    <flux:card class="ring-1 ring-green-200 dark:ring-green-900"><flux:text>Total cobrado durante el período</flux:text><div class="mt-2 text-xl font-semibold">{{ $this->money($report['sales']['collected_base']) }}</div><flux:text size="sm">Suma de todos los pagos reales del período.</flux:text></flux:card>
+                </div>
+            @endif
             <div class="grid gap-4 lg:grid-cols-2">
                 @if ($capabilities['financial'])
                     <flux:card><flux:heading>Métodos de pago</flux:heading><div class="mt-4 divide-y divide-zinc-200 dark:divide-zinc-700">@forelse($report['sales']['by_payment_method'] as $method)<div class="flex justify-between gap-4 py-3"><span>{{ $method['name'] }}</span><strong>{{ $this->money($method['amount_base']) }}</strong></div>@empty<flux:text class="py-3">Sin pagos en el período.</flux:text>@endforelse</div></flux:card>

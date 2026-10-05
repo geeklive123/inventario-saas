@@ -166,6 +166,13 @@ class RegularizeSaleInventory
             throw new DomainException("La cantidad asignada debe ser exactamente {$remaining}.");
         }
 
+        $plannedUnitId = $pending->planned_component_product_id === null
+            ? null
+            : Product::query()
+                ->withoutGlobalScope('company')
+                ->where('company_id', $pending->company_id)
+                ->whereKey($pending->planned_component_product_id)
+                ->value('unit_id');
         $products = Product::query()
             ->withoutGlobalScope('company')
             ->with('unit:id,symbol')
@@ -174,13 +181,14 @@ class RegularizeSaleInventory
             ->where('is_active', true)
             ->where('item_type', ProductItemType::Physical)
             ->where('inventory_behavior', InventoryBehavior::Self)
+            ->when($plannedUnitId, fn ($query, int $unitId) => $query->where('unit_id', $unitId))
             ->orderBy('id')
             ->lockForUpdate()
             ->get()
             ->keyBy('id');
 
         if ($products->count() !== $productIds->count()) {
-            throw new DomainException('Todos los insumos utilizados deben estar activos y pertenecer a la empresa.');
+            throw new DomainException('Todos los insumos utilizados deben estar activos, pertenecer a la empresa y usar una unidad compatible.');
         }
 
         $balances = StockBalance::query()

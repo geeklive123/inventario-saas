@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Enums\SaleOrderStatus;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -28,7 +29,8 @@ class ReportExportRequest extends FormRequest
             'date_from' => ['nullable', 'required_if:period,custom', 'date_format:Y-m-d', 'before_or_equal:date_to'],
             'date_to' => ['nullable', 'required_if:period,custom', 'date_format:Y-m-d', 'after_or_equal:date_from'],
             'scope' => ['required', Rule::in(['current', 'full'])],
-            'section' => ['required', Rule::in(['summary', 'sales', 'bouquets', 'inventory', 'expenses', 'profit'])],
+            'section' => ['required', Rule::in(['summary', 'sales', 'orders', 'bouquets', 'extras', 'inventory', 'expenses', 'profit'])],
+            'order_status' => ['nullable', Rule::enum(SaleOrderStatus::class)],
         ];
     }
 }
